@@ -1,5 +1,12 @@
 package embedder
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+)
+
 // DefaultModel is the Ollama embedding model used by Engrex.
 const DefaultModel = "nomic-embed-text"
 
@@ -11,21 +18,45 @@ type Embedder struct {
 
 // New returns an Embedder pointing at the given Ollama base URL.
 func New(baseURL string) *Embedder {
-	// TODO: return &Embedder{baseURL: baseURL, model: DefaultModel}
-	return nil
+	return &Embedder{baseURL: baseURL, model: DefaultModel}
 }
 
 // Embed sends text to Ollama and returns a 768-dimensional float32 vector.
-func (e *Embedder) Embed(text string) ([]float32, error) {
-	// TODO: POST baseURL+"/api/embed" with {"model": e.model, "input": text}
-	// TODO: decode response {"embeddings": [[...floats...]]}
-	// TODO: return embeddings[0], nil
-	return nil, nil
+func (embedder *Embedder) Embed(text string) ([]float32, error) {
+	body, err := json.Marshal(map[string]string{
+		"model": embedder.model,
+		"input": text,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := http.Post(embedder.baseURL+"/api/embed", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	var result struct {
+		Embeddings [][]float32 `json:"embeddings"`
+	}
+
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if len(result.Embeddings) == 0 {
+		return nil, fmt.Errorf("ollama returned no embeddings")
+	}
+
+	return result.Embeddings[0], nil
 }
 
-// Ping checks that Ollama is reachable. Returns an error with a human-friendly
-// message if not, so callers can show a clear error before doing any real work.
-func (e *Embedder) Ping() error {
-	// TODO: GET baseURL+"/api/tags", check for non-200 or connection refused
+// Pings to check that ollama is reachable
+func (embedder *Embedder) Ping() error {
+	response, err := http.Get(embedder.baseURL + "/api/tags")
+	if err != nil {
+		return fmt.Errorf("ollama isn't running, start it with: ollama serve")
+	}
+	defer response.Body.Close()
 	return nil
 }
