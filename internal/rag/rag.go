@@ -4,8 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/robertkoller/engrex/internal/chunker"
@@ -15,6 +21,8 @@ import (
 
 const ollamaBaseURL = "http://localhost:11434"
 const generateModel = "llama3.2"
+const DefaultSearchDistance = 0.85
+const DefaultSearchResults = 10
 
 // RAG wires the embedder, store, and LLM together into the add/query pipeline.
 type RAG struct {
@@ -52,6 +60,17 @@ func (r *RAG) Add(text string, source string) error {
 		}
 	}
 
+	var title string
+	if len(text) > 20 {
+		title = text[:20]
+	} else {
+		title = text
+	}
+
+	if err := cliTextStub(fmt.Sprintf("%v...txt", title), []byte(text)); err != nil {
+		log.Printf("failed to write stub file: %v", err)
+	}
+
 	fmt.Printf("Saved %d chunk(s).\n", savedCount)
 	return nil
 }
@@ -67,7 +86,7 @@ func (r *RAG) DebugSearch(question string) ([]store.Chunk, error) {
 
 // Query embeds the question, retrieves the top-K most relevant chunks,
 // builds a RAG prompt, and streams the LLM response to stdout.
-func (r *RAG) Query(question string, maxDistance float64, topK int) error {
+func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK int) error {
 	queryVec, err := r.embedder.Embed(question)
 	if err != nil {
 		return err
@@ -80,7 +99,7 @@ func (r *RAG) Query(question string, maxDistance float64, topK int) error {
 
 	var prompt string
 	if len(chunks) == 0 {
-		fmt.Println("[No relevant notes found — answering from outside knowledge]")
+		fmt.Fprintln(out, "[No relevant notes found — answering from outside knowledge]")
 		prompt = buildNoContextPrompt(question)
 	} else {
 		prompt = buildPrompt(question, chunks)
@@ -107,14 +126,14 @@ func (r *RAG) Query(question string, maxDistance float64, topK int) error {
 			Done     bool   `json:"done"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &token); err != nil {
-			fmt.Print(err)
+			fmt.Fprint(out, err)
 		}
-		fmt.Print(token.Response)
+		fmt.Fprint(out, token.Response)
 		if token.Done {
 			break
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(out)
 	return nil
 }
 
@@ -122,7 +141,7 @@ func (r *RAG) Query(question string, maxDistance float64, topK int) error {
 func buildPrompt(question string, chunks []store.Chunk) string {
 	var builder strings.Builder // yes im using string builder, no its not ai who wrote this ik that string builder is less compute
 
-	builder.WriteString("You are a personal knowledge assistant. Answer the question using ONLY the provided context below — these are notes the user has personally saved. Do not use any outside knowledge. If you include information that is not explicitly stated in the context, you MUST prefix that sentence with \"[outside knowledge]:\" so the user knows it did not come from their notes. Be direct and specific.\n\nContext:\n")
+	builder.WriteString("You are a personal knowledge assistant. The user has saved the following notes. Answer the question as completely as possible using ALL of the relevant notes provided — do not skip or summarize away details, cover everything that is relevant. If the notes do not fully answer the question, supplement with your own knowledge but prefix every sentence that comes from outside the notes with \"[outside knowledge]:\" so the user can clearly tell the difference. Be direct and comprehensive.\n\nContext:\n")
 
 	for index, chunk := range chunks {
 		fmt.Fprintf(&builder, "[%d] (saved %s, source: %s)\n%s\n\n", index+1, chunk.CreatedAt.Format("2006-01-02"), chunk.Source, chunk.Text)
@@ -141,4 +160,41 @@ func buildNoContextPrompt(question string) string {
 			"to make clear this answer does not come from their saved notes.\n\nQuestion: %s",
 		question,
 	)
+}
+
+// This creates a text file in engrex files folder whenever we upload from the cli so the user can have a better time searching thorugh stuff
+func cliTextStub(name string, content []byte) error {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, "EngrexFiles")
+
+	err := os.MkdirAll(path, os.ModePerm)
+	if err != nil {
+		return err
+	}
+	path = filepath.Join(path, name)
+	_, err = os.Stat(path)
+
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	for i := 1; err == nil; i++ {
+		numberedPath := fmt.Sprintf("%v (%d)", path, i)
+		_, err = os.Stat(numberedPath)
+
+		if errors.Is(err, fs.ErrNotExist) {
+			path = numberedPath
+			break
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if i >= 1000 {
+			return errors.New("Too many duplicate files found, aborting creation")
+		}
+	}
+	return os.WriteFile(path, content, 0644)
+
 }
