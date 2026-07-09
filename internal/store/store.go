@@ -2,10 +2,16 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/robertkoller/engrex/internal/db"
 )
+
+var ErrInvalidDelete = errors.New("Invalid delete syntax. Use engrex delete ?, ?, ?-?, etc...")
 
 // Chunk is a row returned from search.
 type Chunk struct {
@@ -102,6 +108,85 @@ func (store *Store) Clear() error {
 	return tx.Commit()
 }
 
+// Deletes user inputted ids from the engrex store
+func (store *Store) Delete(args string) error {
+	ids, err := getDeletionIDs(args)
+	if err != nil {
+		return err
+	}
+
+	placeholders := make([]string, len(ids))
+	for index := range ids {
+		placeholders[index] = "?"
+	}
+	inClause := strings.Join(placeholders, ", ")
+	queryChunk := fmt.Sprintf("DELETE FROM chunks WHERE id IN (%s)", inClause)
+	queryVec := fmt.Sprintf("DELETE FROM vec_chunks WHERE rowid IN (%s)", inClause)
+
+	tx, _ := store.db.Begin()
+
+	if _, err := tx.Exec(queryVec, ids...); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+
+	if _, err := tx.Exec(queryChunk, ids...); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+
+	return tx.Commit()
+
+}
+
+// Returns the ids from the user inputted engrex delete function or an error if they are formatted wrongly
+// The format should follow engrex delete ..., where ... can equal ?, or ?-?, or a mixture of the two seperated by commas
+// Since the db.Exec takes []any not []int we format the ids and return them as []any
+func getDeletionIDs(args string) ([]any, error) {
+	var ids []any
+	hashSet := make(map[int]struct{}) // we make set to not overlap entries
+
+	split := strings.Split(args, ",")
+	for _, entry := range split {
+		entry = strings.TrimSpace(entry)
+		number, isInt := isInteger(entry)
+		if isInt {
+			if _, found := hashSet[number]; !found {
+				hashSet[number] = struct{}{}
+				ids = append(ids, number)
+			}
+		} else {
+			dashSplit := strings.Split(entry, "-")
+			if len(dashSplit) != 2 {
+				return nil, ErrInvalidDelete
+			} else {
+				startNumber, isStartInt := isInteger(dashSplit[0])
+				endNumber, isEndInt := isInteger(dashSplit[1])
+
+				if !isEndInt || !isStartInt {
+					return nil, ErrInvalidDelete
+				}
+
+				if startNumber > endNumber { // fancy smancy number swap
+					startNumber = startNumber + endNumber
+					endNumber = startNumber - endNumber
+					startNumber = startNumber - endNumber
+				}
+
+				for i := startNumber; i <= endNumber; i++ {
+					if _, found := hashSet[i]; !found {
+						hashSet[i] = struct{}{}
+						ids = append(ids, i)
+					}
+				}
+			}
+		}
+	}
+
+	return ids, nil
+
+}
+
 // RawSearch returns all chunks with their raw distances, no filtering applied.
 // Used for calibrating distance thresholds.
 func (store *Store) RawSearch(vec []float32) ([]Chunk, error) {
@@ -174,4 +259,12 @@ func (store *Store) Search(vec []float32, maxDistance float64, topK int) ([]Chun
 		outputChunks = outputChunks[:topK]
 	}
 	return outputChunks, nil
+}
+
+func isInteger(s string) (int, bool) {
+	number, err := strconv.Atoi(s)
+	if err == nil {
+		return number, true
+	}
+	return 0, false
 }
