@@ -39,6 +39,12 @@ func Open() (*DB, error) {
 	return &DB{sqlDB}, nil
 }
 
+// Migrate re-runs schema creation. Exported so callers (e.g. clear) can rebuild
+// the schema after dropping tables.
+func (d *DB) Migrate() error {
+	return migrate(d.DB)
+}
+
 // migrate creates all tables and virtual tables on first run.
 func migrate(db *sql.DB) error {
 	_, err := db.Exec(`
@@ -46,6 +52,7 @@ func migrate(db *sql.DB) error {
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
 			text       TEXT NOT NULL,
 			source     TEXT NOT NULL DEFAULT 'cli',
+			origin     TEXT NOT NULL DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 

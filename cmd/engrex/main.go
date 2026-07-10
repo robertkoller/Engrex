@@ -29,6 +29,30 @@ type socketResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// clearEngrexFolder deletes everything inside ~/Engrex (files and subfolders like
+// RawText) while keeping the ~/Engrex directory itself so the watcher keeps working.
+func clearEngrexFolder() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	engrexDir := filepath.Join(home, "Engrex")
+
+	entries, err := os.ReadDir(engrexDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(engrexDir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func sendCommand(command socketCommand) error {
 	home, _ := os.UserHomeDir()
 	socketPath := filepath.Join(home, ".engrex", "daemon.sock")
@@ -44,8 +68,29 @@ func sendCommand(command socketCommand) error {
 	}
 
 	if command.Type == "query" {
-		_, err = io.Copy(os.Stdout, conn)
-		return err
+		reader := bufio.NewReader(conn)
+
+		// First line is the JSON sources list; the rest is the answer stream.
+		sourcesLine, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		var sourcesPayload struct {
+			Sources []string `json:"sources"`
+		}
+		_ = json.Unmarshal([]byte(sourcesLine), &sourcesPayload)
+
+		if _, err := io.Copy(os.Stdout, reader); err != nil {
+			return err
+		}
+
+		if len(sourcesPayload.Sources) > 0 {
+			fmt.Println("\nSources:")
+			for _, source := range sourcesPayload.Sources {
+				fmt.Printf("  - %s\n", filepath.Base(source))
+			}
+		}
+		return nil
 	}
 
 	var response socketResponse
@@ -120,7 +165,13 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 				return nil
 			}
 			for _, chunk := range chunks {
-				fmt.Printf("[%d] %s | %s\n%s\n\n", chunk.ID, chunk.CreatedAt.Format("2006-01-02 15:04:05"), chunk.Source, chunk.Text)
+				var text string
+				if len(chunk.Text) > 200 {
+					text = chunk.Text[:200] + "..."
+				} else {
+					text = chunk.Text
+				}
+				fmt.Printf("[%d] %s | %s\n%s\n\n", chunk.ID, chunk.CreatedAt.Format("2006-01-02 15:04:05"), chunk.Source, text)
 			}
 			return nil
 		},
@@ -128,11 +179,11 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 
 	clearCmd := &cobra.Command{
 		Use:   "clear",
-		Short: "Delete all stored chunks",
-		Long:  "Wipes the entire knowledge base after asking for confirmation. This cannot be undone.",
+		Short: "Delete all stored chunks and files",
+		Long:  "Wipes the entire knowledge base and everything in ~/Engrex after asking for confirmation. This cannot be undone.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Print("This will delete all stored chunks. Are you sure? (y/n): ")
+			fmt.Print("This will delete all stored chunks AND every file in ~/Engrex. Are you sure? (y/n): ")
 			scanner := bufio.NewScanner(os.Stdin)
 			scanner.Scan()
 			if strings.TrimSpace(strings.ToLower(scanner.Text())) != "y" {
@@ -142,7 +193,10 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 			if err := store.Clear(); err != nil {
 				return err
 			}
-			fmt.Println("Database cleared.")
+			if err := clearEngrexFolder(); err != nil {
+				return err
+			}
+			fmt.Println("Database and ~/Engrex cleared.")
 			return nil
 		},
 	}

@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/robertkoller/engrex/internal/db"
+	"github.com/robertkoller/engrex/internal/httpserver"
 	"github.com/robertkoller/engrex/internal/rag"
 	"github.com/robertkoller/engrex/internal/socket"
 	"github.com/robertkoller/engrex/internal/store"
@@ -19,6 +20,7 @@ type Daemon struct {
 	database *db.DB
 	store    *store.Store
 	rag      *rag.RAG
+	server   *httpserver.Server
 	watcher  *watcher.Watcher
 	socket   *socket.Socket
 }
@@ -40,11 +42,13 @@ func Start() (*Daemon, error) {
 
 	watcher := watcher.New(rag)
 	socket := socket.New(rag, store)
+	httpServer := httpserver.New(rag)
 
 	return &Daemon{
 		database: database,
 		store:    store,
 		rag:      rag,
+		server:   httpServer,
 		watcher:  watcher,
 		socket:   socket,
 	}, nil
@@ -57,10 +61,12 @@ func (daemon *Daemon) Run() error {
 
 	go daemon.watcher.Start()
 	go daemon.socket.Start()
+	go daemon.server.Start()
 	<-signals
 
 	daemon.watcher.Stop()
 	daemon.socket.Stop()
+	daemon.server.Stop()
 	daemon.database.Close()
 	return nil
 }
