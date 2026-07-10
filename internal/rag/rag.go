@@ -21,7 +21,7 @@ import (
 
 const ollamaBaseURL = "http://localhost:11434"
 const generateModel = "llama3.2"
-const DefaultSearchDistance = 0.85
+const DefaultSearchDistance = 0.95
 const DefaultSearchResults = 10
 
 // RAG wires the embedder, store, and LLM together into the add/query pipeline.
@@ -39,8 +39,9 @@ func New(s *store.Store) (*RAG, error) {
 	return &RAG{embedder: embed, store: s}, nil
 }
 
-// Add chunks the text, embeds each chunk, and stores them with the given source label.
-func (r *RAG) Add(text string, source string) error {
+// Add chunks the text, embeds each chunk, and stores them with the given source
+// label and origin (the original path a file was added from; "" when unknown).
+func (r *RAG) Add(text string, source string, origin string) error {
 	chunks := chunker.Chunk(text)
 	savedCount := 0
 	for _, chunk := range chunks {
@@ -49,7 +50,7 @@ func (r *RAG) Add(text string, source string) error {
 			return err
 		}
 
-		inserted, err := r.store.Insert(chunk, source, vector)
+		inserted, err := r.store.Insert(chunk, source, origin, vector)
 		if err != nil {
 			return err
 		}
@@ -60,15 +61,16 @@ func (r *RAG) Add(text string, source string) error {
 		}
 	}
 
-	var title string
-	if len(text) > 20 {
-		title = text[:20]
-	} else {
-		title = text
-	}
-
-	if err := cliTextStub(fmt.Sprintf("%v...txt", title), []byte(text)); err != nil {
-		log.Printf("failed to write stub file: %v", err)
+	if _, statErr := os.Stat(source); statErr != nil {
+		var title string
+		if len(text) > 20 {
+			title = text[:20]
+		} else {
+			title = text
+		}
+		if err := cliTextStub(fmt.Sprintf("%v.txt", title), []byte(text)); err != nil {
+			log.Printf("failed to write stub file: %v", err)
+		}
 	}
 
 	fmt.Printf("Saved %d chunk(s).\n", savedCount)
@@ -87,6 +89,7 @@ func (r *RAG) DebugSearch(question string) ([]store.Chunk, error) {
 // Query embeds the question, retrieves the top-K most relevant chunks,
 // builds a RAG prompt, and streams the LLM response to stdout.
 func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK int) error {
+	question, options := parseQueryFlags(question)
 	queryVec, err := r.embedder.Embed(question)
 	if err != nil {
 		return err
@@ -97,12 +100,16 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 		return err
 	}
 
+	if err := json.NewEncoder(out).Encode(map[string][]string{"sources": collectSources(chunks)}); err != nil {
+		return err
+	}
+
 	var prompt string
 	if len(chunks) == 0 {
 		fmt.Fprintln(out, "[No relevant notes found — answering from outside knowledge]")
 		prompt = buildNoContextPrompt(question)
 	} else {
-		prompt = buildPrompt(question, chunks)
+		prompt = buildPrompt(question, chunks, options)
 	}
 
 	body, err := json.Marshal(map[string]any{
@@ -137,17 +144,88 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 	return nil
 }
 
+// collectSources returns the deduplicated real-file sources of the retrieved chunks,
+// in order, skipping non-file sources like "cli" and "hotkey". Prefers the origin
+// (where a file was added from) over the internal ~/Engrex copy path when known.
+func collectSources(chunks []store.Chunk) []string {
+	seen := make(map[string]bool)
+	sources := make([]string, 0)
+	for _, chunk := range chunks {
+		source := chunk.Source
+		if chunk.Origin != "" {
+			source = chunk.Origin
+		}
+		if !isLinkableSource(source) {
+			continue
+		}
+		if seen[source] {
+			continue
+		}
+		seen[source] = true
+		sources = append(sources, source)
+	}
+	return sources
+}
+
+// isLinkableSource reports whether a source is something the UI can open —
+// an absolute file path or a web URL (skips labels like "cli" and "hotkey").
+func isLinkableSource(source string) bool {
+	return filepath.IsAbs(source) ||
+		strings.HasPrefix(source, "http://") ||
+		strings.HasPrefix(source, "https://")
+}
+
+// Flag options
+type queryOptions struct {
+	includeDate   bool
+	includeSource bool
+}
+
+// Reformats the query to seperate the quuery and flags
+func parseQueryFlags(question string) (string, queryOptions) {
+	fields := strings.Fields(question)
+	kept := make([]string, 0, len(fields))
+	var options queryOptions
+	for _, field := range fields {
+		switch field {
+		case "--date":
+			options.includeDate = true
+		case "--source":
+			options.includeSource = true
+		default:
+			kept = append(kept, field)
+		}
+	}
+	return strings.Join(kept, " "), options
+}
+
 // buildPrompt formats retrieved chunks and the user question into a RAG prompt.
-func buildPrompt(question string, chunks []store.Chunk) string {
+func buildPrompt(question string, chunks []store.Chunk, options queryOptions) string {
 	var builder strings.Builder // yes im using string builder, no its not ai who wrote this ik that string builder is less compute
 
-	builder.WriteString("You are a personal knowledge assistant. The user has saved the following notes. Answer the question as completely as possible using ALL of the relevant notes provided — do not skip or summarize away details, cover everything that is relevant. If the notes do not fully answer the question, supplement with your own knowledge but prefix every sentence that comes from outside the notes with \"[outside knowledge]:\" so the user can clearly tell the difference. Be direct and comprehensive.\n\nContext:\n")
+	builder.WriteString("You are a personal knowledge assistant. The user has saved the following notes. Answer the question as completely as possible using ALL of the relevant notes provided — do not skip or summarize away details, cover everything that is relevant. If the notes do not fully answer the question, supplement with your own knowledge but prefix every sentence that comes from outside the notes with \"[outside knowledge]:\" so the user can clearly tell the difference. Be direct and comprehensive.")
+
+	// Citation instruction goes with the system instructions at the top — NOT next to
+	// the notes/question, or the model tends to echo it back into its answer.
+	if options.includeDate || options.includeSource {
+		var parts []string
+		if options.includeDate {
+			parts = append(parts, "the date it was saved")
+		}
+		if options.includeSource {
+			parts = append(parts, "its source file")
+		}
+		fmt.Fprintf(&builder, " Whenever you use information from a note, cite %s once, in parentheses right where you use it (for example: \"(source: notes.md, saved 2025-01-02)\"). Cite each note only once — not on every sentence.", strings.Join(parts, " and "))
+	}
+
+	builder.WriteString("\n\nContext:\n")
 
 	for index, chunk := range chunks {
-		fmt.Fprintf(&builder, "[%d] (saved %s, source: %s)\n%s\n\n", index+1, chunk.CreatedAt.Format("2006-01-02"), chunk.Source, chunk.Text)
+		fmt.Fprintf(&builder, "[%d] (saved %s, source: %s)\n%s\n\n", index+1, chunk.CreatedAt.Format("2006-01-02"), filepath.Base(chunk.Source), chunk.Text)
 	}
 
 	fmt.Fprintf(&builder, "Question: %s", question)
+
 	return builder.String()
 }
 
@@ -162,10 +240,12 @@ func buildNoContextPrompt(question string) string {
 	)
 }
 
-// This creates a text file in engrex files folder whenever we upload from the cli so the user can have a better time searching thorugh stuff
+// Writes a .txt stub for raw CLI/hotkey text into ~/Engrex/RawText so the user can
+// browse it as a file. RawText is a subfolder of the watched dir but is not watched
+// itself, so these stubs are never re-ingested.
 func cliTextStub(name string, content []byte) error {
 	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, "EngrexFiles")
+	path := filepath.Join(home, "Engrex", "RawText")
 
 	err := os.MkdirAll(path, os.ModePerm)
 	if err != nil {

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Engrex Capture",
+  "version": "1.0.0",
+  "description": "Save the selected text (or the whole page) to Engrex with its URL and title.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1:7777/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Save to Engrex"
+  },
+  "commands": {
+    "capture": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+E",
+        "mac": "Command+Shift+E"
+      },
+      "description": "Save selection or page to Engrex"
+    }
+  }
+}

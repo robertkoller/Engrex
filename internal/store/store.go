@@ -18,6 +18,7 @@ type Chunk struct {
 	ID        int64
 	Text      string
 	Source    string
+	Origin    string
 	CreatedAt time.Time
 	Distance  float64
 }
@@ -36,7 +37,7 @@ const deduplicationThreshold = 0.35
 
 // Insert writes a text chunk and its embedding vector to the database.
 // Returns true if inserted, false if skipped as a near-duplicate.
-func (store *Store) Insert(text, source string, vec []float32) (bool, error) {
+func (store *Store) Insert(text, source, origin string, vec []float32) (bool, error) {
 	blob, _ := json.Marshal(vec)
 
 	var nearestDistance float64
@@ -52,7 +53,7 @@ func (store *Store) Insert(text, source string, vec []float32) (bool, error) {
 
 	tx, _ := store.db.Begin()
 
-	response, err := tx.Exec(`INSERT INTO chunks(text, source) VALUES (?, ?)`, text, source)
+	response, err := tx.Exec(`INSERT INTO chunks(text, source, origin) VALUES (?, ?, ?)`, text, source, origin)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
 		return false, err
@@ -72,7 +73,7 @@ func (store *Store) Insert(text, source string, vec []float32) (bool, error) {
 // List returns every chunk in the database ordered by most recent first.
 func (store *Store) List() ([]Chunk, error) {
 	rows, err := store.db.Query(`
-		SELECT id, text, source, created_at
+		SELECT id, text, source, origin, created_at
 		FROM chunks
 		ORDER BY created_at DESC`)
 	if err != nil {
@@ -83,7 +84,7 @@ func (store *Store) List() ([]Chunk, error) {
 	var chunks []Chunk
 	for rows.Next() {
 		var chunk Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.Text, &chunk.Source, &chunk.CreatedAt); err != nil {
+		if err := rows.Scan(&chunk.ID, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, chunk)
@@ -94,18 +95,17 @@ func (store *Store) List() ([]Chunk, error) {
 	return chunks, nil
 }
 
-// Clear deletes all chunks and vectors from the database.
+// Clear drops and recreates the tables, wiping all data AND rebuilding the schema.
+// Dropping/recreating (rather than DELETE) means schema changes — like a new column
+// — take effect, and the change propagates to the daemon's live connection too.
 func (store *Store) Clear() error {
-	tx, _ := store.db.Begin()
-	if _, err := tx.Exec(`DELETE FROM vec_chunks`); err != nil {
-		tx.Rollback() //nolint:errcheck
+	if _, err := store.db.Exec(`DROP TABLE IF EXISTS vec_chunks`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM chunks`); err != nil {
-		tx.Rollback() //nolint:errcheck
+	if _, err := store.db.Exec(`DROP TABLE IF EXISTS chunks`); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return store.db.Migrate()
 }
 
 // Deletes user inputted ids from the engrex store
@@ -193,7 +193,7 @@ func (store *Store) RawSearch(vec []float32) ([]Chunk, error) {
 	jsonVector, _ := json.Marshal(vec)
 
 	rows, err := store.db.Query(`
-		SELECT v.rowid, v.distance, c.text, c.source, c.created_at
+		SELECT v.rowid, v.distance, c.text, c.source, c.origin, c.created_at
 		FROM (
 			SELECT rowid, distance
 			FROM vec_chunks
@@ -210,7 +210,7 @@ func (store *Store) RawSearch(vec []float32) ([]Chunk, error) {
 	var chunks []Chunk
 	for rows.Next() {
 		var chunk Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.Distance, &chunk.Text, &chunk.Source, &chunk.CreatedAt); err != nil {
+		if err := rows.Scan(&chunk.ID, &chunk.Distance, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, chunk)
@@ -224,7 +224,7 @@ func (store *Store) Search(vec []float32, maxDistance float64, topK int) ([]Chun
 	jsonVector, _ := json.Marshal(vec)
 
 	rows, err := store.db.Query(`
-	SELECT v.rowid, v.distance, c.text, c.source, c.created_at
+	SELECT v.rowid, v.distance, c.text, c.source, c.origin, c.created_at
 	FROM (
 		SELECT rowid, distance
 		FROM vec_chunks
@@ -243,7 +243,7 @@ func (store *Store) Search(vec []float32, maxDistance float64, topK int) ([]Chun
 	var outputChunks []Chunk
 	for rows.Next() {
 		var chunk Chunk
-		err := rows.Scan(&chunk.ID, &chunk.Distance, &chunk.Text, &chunk.Source, &chunk.CreatedAt)
+		err := rows.Scan(&chunk.ID, &chunk.Distance, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt)
 		if err != nil {
 			return nil, err
 		}

@@ -3,11 +3,14 @@ package socket
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/robertkoller/engrex/internal/ingest"
 	"github.com/robertkoller/engrex/internal/rag"
 	"github.com/robertkoller/engrex/internal/store"
 )
@@ -79,7 +82,7 @@ func (socket *Socket) handleConnection(conn net.Conn) {
 
 	switch command.Type {
 	case "add":
-		if err := socket.rag.Add(command.Text, command.Source); err != nil {
+		if err := socket.rag.Add(command.Text, command.Source, ""); err != nil {
 			if err := json.NewEncoder(conn).Encode(Response{Error: err.Error()}); err != nil {
 				log.Printf("failed encoding error response: %v", err)
 			}
@@ -103,6 +106,91 @@ func (socket *Socket) handleConnection(conn net.Conn) {
 			if err := json.NewEncoder(conn).Encode(Response{}); err != nil {
 				log.Printf("failed encoding success response: %v", err)
 			}
+		}
+	case "addfile":
+		if err := socket.addFile(command.Text); err != nil {
+			if err := json.NewEncoder(conn).Encode(Response{Error: err.Error()}); err != nil {
+				log.Printf("failed encoding error response: %v", err)
+			}
+		} else {
+			if err := json.NewEncoder(conn).Encode(Response{}); err != nil {
+				log.Printf("failed encoding success response: %v", err)
+			}
+		}
+	}
+}
+
+// addFile copies the file at originalPath into ~/Engrex, ingests it, and records
+// the original path as the chunk origin. The watcher is told to skip the copy so
+// it doesn't double-ingest it with an empty origin.
+func (socket *Socket) addFile(originalPath string) error {
+	// Reject unsupported types before copying anything into ~/Engrex.
+	if !ingest.IsSupported(originalPath) {
+		return fmt.Errorf("unsupported file type: %s", filepath.Ext(originalPath))
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	engrexDir := filepath.Join(home, "Engrex")
+	if err := os.MkdirAll(engrexDir, os.ModePerm); err != nil {
+		return err
+	}
+
+	destination := uniqueDestination(engrexDir, filepath.Base(originalPath))
+
+	// Mark before creating so we dont like double create because of the watcher
+	ingest.MarkPending(destination)
+
+	if err := copyFile(originalPath, destination); err != nil {
+		return err
+	}
+
+	text, err := ingest.ExtractText(destination)
+	if err != nil {
+		os.Remove(destination) //nolint:errcheck
+		return err
+	}
+	if text == "" {
+		// Supported extension but nothing readable (empty/binary) — don't leave an orphan.
+		os.Remove(destination) //nolint:errcheck
+		return fmt.Errorf("no readable text found in %s", filepath.Base(originalPath))
+	}
+
+	return socket.rag.Add(text, destination, originalPath)
+}
+
+// copies a file over
+func copyFile(source string, destination string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+
+	output, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	defer output.Close()
+
+	_, err = io.Copy(output, input)
+	return err
+}
+
+// If a file already exists we want to keep like adding a (1) or whatever to make sure a file is added
+func uniqueDestination(dir string, name string) string {
+	destination := filepath.Join(dir, name)
+	if _, err := os.Stat(destination); os.IsNotExist(err) {
+		return destination
+	}
+	extension := filepath.Ext(name)
+	base := strings.TrimSuffix(name, extension)
+	for counter := 1; ; counter++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, counter, extension))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
 		}
 	}
 }
