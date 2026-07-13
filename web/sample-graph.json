@@ -1,0 +1,90 @@
+{
+  "nodes": [
+    {
+      "id": 1,
+      "label": "The contest between local-first tooling and cloud sync…",
+      "source": "notes.md",
+      "createdAt": "2026-07-12T09:14:00-07:00",
+      "text": "The contest between local-first tooling and cloud sync is really a contest over ownership. Local-first keeps the source of truth on your machine, treats the network as an optimization rather than a dependency, and degrades gracefully when offline. Engrex leans hard into this: the daemon owns the SQLite store and the embeddings never leave the device unless you explicitly export them."
+    },
+    {
+      "id": 2,
+      "label": "Cosine distance vs. cosine similarity for ranking…",
+      "source": "cli",
+      "createdAt": "2026-07-12T02:41:00-07:00",
+      "text": "Cosine distance is 1 minus cosine similarity. When we store edge weights we keep the distance (smaller = more similar) because most vector indexes return distances directly. For rendering, similarity = 1 - distance gives a clean 0..1 strength we can map to link opacity and width."
+    },
+    {
+      "id": 3,
+      "label": "Force-directed layouts trade determinism for legibility…",
+      "source": "notes.md",
+      "createdAt": "2026-07-11T18:03:00-07:00",
+      "text": "Force-directed layouts trade determinism for legibility. Every run can settle differently, but clusters of related nodes fall together and outliers drift to the edge. The charge (many-body) force pushes nodes apart, links pull neighbors together, and a weak centering force keeps the whole thing on screen."
+    },
+    {
+      "id": 4,
+      "label": "Embeddings are lossy compressions of meaning…",
+      "source": "https://example.com/embeddings-primer",
+      "createdAt": "2026-07-09T11:20:00-07:00",
+      "text": "Embeddings are lossy compressions of meaning into a fixed-length vector. Two chunks that talk about the same idea in different words land near each other; a chunk that shares vocabulary but not meaning may sit surprisingly far away. This is why a knowledge graph over embeddings surfaces conceptual neighbors, not just keyword matches."
+    },
+    {
+      "id": 5,
+      "label": "Chunking strategy shapes retrieval quality…",
+      "source": "notes.md",
+      "createdAt": "2026-07-07T16:45:00-07:00",
+      "text": "Chunking strategy shapes retrieval quality more than the embedding model does, most of the time. Too small and each chunk loses context; too large and a single vector has to represent several ideas at once, blurring its position in the space. Sentence-window and semantic chunking both try to keep one coherent idea per chunk."
+    },
+    {
+      "id": 6,
+      "label": "SQLite as an application file format…",
+      "source": "reading-list.md",
+      "createdAt": "2026-07-05T08:12:00-07:00",
+      "text": "SQLite as an application file format is an underused pattern. Instead of inventing a bespoke on-disk layout, you get transactions, a query language, and battle-tested durability for free. Engrex stores chunks, embeddings, and relations in one file that the user can back up by copying it."
+    },
+    {
+      "id": 7,
+      "label": "The second-brain promise and its failure modes…",
+      "source": "https://example.com/second-brain",
+      "createdAt": "2026-06-28T14:30:00-07:00",
+      "text": "The second-brain promise is that capture plus retrieval beats memory. The failure mode is a graveyard of notes you never revisit. A graph view fights this by making relationships visible: you rediscover an old note because it lit up next to something you wrote today."
+    },
+    {
+      "id": 8,
+      "label": "Daemon architecture keeps the UI thin…",
+      "source": "cli",
+      "createdAt": "2026-06-20T10:05:00-07:00",
+      "text": "A daemon architecture keeps the UI thin. The long-lived process owns the store, the embedding pipeline, and the HTTP surface on localhost:7778. The web front-end and the native macOS app are both just clients that render whatever the daemon serves, which means they never disagree about the data."
+    },
+    {
+      "id": 9,
+      "label": "Recency as a first-class signal in a note graph…",
+      "source": "notes.md",
+      "createdAt": "2026-06-10T20:50:00-07:00",
+      "text": "Recency deserves to be a first-class visual signal. Warm, bright nodes are things you touched recently; cool, dim nodes are older. Coloring by createdAt turns the graph into a rough timeline you can read at a glance, without a separate axis."
+    },
+    {
+      "id": 10,
+      "label": "Offline-first means the CDN is the enemy…",
+      "source": "notes.md",
+      "createdAt": "2026-05-30T13:22:00-07:00",
+      "text": "Offline-first means the CDN is the enemy. Every remote asset is a way for the app to break on a plane or behind a firewall. Vendoring D3 into the web directory keeps the whole visualization working with the network unplugged, which is the entire point of a local-first tool."
+    }
+  ],
+  "edges": [
+    { "source": 1, "target": 10, "distance": 0.28 },
+    { "source": 1, "target": 6, "distance": 0.44 },
+    { "source": 1, "target": 8, "distance": 0.39 },
+    { "source": 2, "target": 4, "distance": 0.31 },
+    { "source": 2, "target": 3, "distance": 0.52 },
+    { "source": 3, "target": 9, "distance": 0.47 },
+    { "source": 3, "target": 4, "distance": 0.4 },
+    { "source": 4, "target": 5, "distance": 0.22 },
+    { "source": 5, "target": 4, "distance": 0.35 },
+    { "source": 6, "target": 8, "distance": 0.33 },
+    { "source": 7, "target": 9, "distance": 0.41 },
+    { "source": 7, "target": 5, "distance": 0.58 },
+    { "source": 8, "target": 10, "distance": 0.49 },
+    { "source": 9, "target": 1, "distance": 0.53 }
+  ]
+}

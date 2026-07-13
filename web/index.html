@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Engrex — Knowledge Graph</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Connection / error banner (hidden until something goes wrong) -->
+    <div id="banner" class="banner hidden" role="alert"></div>
+
+    <!-- The force-directed graph renders into this SVG -->
+    <svg id="graph" aria-label="Knowledge graph"></svg>
+
+    <!-- Search toolbar -->
+    <header class="toolbar glass">
+      <div class="toolbar-controls">
+        <div class="search-wrap">
+          <input
+            id="search"
+            class="search-input"
+            type="search"
+            placeholder="Search text or source…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+      </div>
+    </header>
+
+    <!-- Detail panel, slides in from the right on click -->
+    <aside class="panel glass hidden" id="panel" aria-live="polite">
+      <button class="panel-close" id="panel-close" aria-label="Close panel">×</button>
+      <div class="panel-source" id="panel-source"></div>
+      <div class="panel-body" id="panel-text"></div>
+
+      <button class="ask-btn" id="ask-btn">Ask about this</button>
+      <div class="ask-result hidden" id="ask-result"></div>
+
+      <div class="panel-neighbors" id="panel-neighbors"></div>
+    </aside>
+
+    <!-- Empty state, shown when the graph has no nodes -->
+    <div class="empty-state hidden" id="empty-state">
+      <div class="empty-icon">◍</div>
+      <div class="empty-title">Nothing here yet</div>
+      <div class="empty-sub">Save some notes and they'll appear in the graph.</div>
+    </div>
+
+    <!-- Loading shimmer -->
+    <div class="loading" id="loading">Loading graph…</div>
+
+    <script src="d3.v7.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
