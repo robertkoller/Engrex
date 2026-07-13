@@ -42,7 +42,10 @@ func New(s *store.Store) (*RAG, error) {
 // Add chunks the text, embeds each chunk, and stores them with the given source
 // label and origin (the original path a file was added from; "" when unknown).
 func (r *RAG) Add(text string, source string, origin string) error {
-	chunks := chunker.Chunk(text)
+	chunks, err := chunker.Chunk(text)
+	if err != nil {
+		return err
+	}
 	savedCount := 0
 	for _, chunk := range chunks {
 		vector, err := r.embedder.Embed(chunk)
@@ -62,14 +65,22 @@ func (r *RAG) Add(text string, source string, origin string) error {
 	}
 
 	if _, statErr := os.Stat(source); statErr != nil {
-		var title string
-		if len(text) > 20 {
-			title = text[:20]
+		if isWebURL(origin) {
+			header := fmt.Sprintf("Title: %s\nSource: %s\n\n", source, origin)
+			name := sanitizeFilename(source) + ".txt"
+			if err := cliTextStub(name, []byte(header+text)); err != nil {
+				log.Printf("failed to write stub file: %v", err)
+			}
 		} else {
-			title = text
-		}
-		if err := cliTextStub(fmt.Sprintf("%v.txt", title), []byte(text)); err != nil {
-			log.Printf("failed to write stub file: %v", err)
+			var title string
+			if len(text) > 20 {
+				title = text[:20]
+			} else {
+				title = text
+			}
+			if err := cliTextStub(fmt.Sprintf("%v.txt", title), []byte(text)); err != nil {
+				log.Printf("failed to write stub file: %v", err)
+			}
 		}
 	}
 
@@ -170,9 +181,26 @@ func collectSources(chunks []store.Chunk) []string {
 // isLinkableSource reports whether a source is something the UI can open —
 // an absolute file path or a web URL (skips labels like "cli" and "hotkey").
 func isLinkableSource(source string) bool {
-	return filepath.IsAbs(source) ||
-		strings.HasPrefix(source, "http://") ||
-		strings.HasPrefix(source, "https://")
+	return filepath.IsAbs(source) || isWebURL(source)
+}
+
+func isWebURL(source string) bool {
+	return strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://")
+}
+
+// sanitizeFilename makes a page title safe to use as a filename: strips path
+// separators, trims whitespace, and caps the length.
+func sanitizeFilename(name string) string {
+	name = strings.ReplaceAll(name, "/", "-")
+	name = strings.ReplaceAll(name, "\\", "-")
+	name = strings.TrimSpace(name)
+	if runes := []rune(name); len(runes) > 60 {
+		name = strings.TrimSpace(string(runes[:60]))
+	}
+	if name == "" {
+		name = "untitled"
+	}
+	return name
 }
 
 // Flag options
@@ -203,7 +231,7 @@ func parseQueryFlags(question string) (string, queryOptions) {
 func buildPrompt(question string, chunks []store.Chunk, options queryOptions) string {
 	var builder strings.Builder // yes im using string builder, no its not ai who wrote this ik that string builder is less compute
 
-	builder.WriteString("You are a personal knowledge assistant. The user has saved the following notes. Answer the question as completely as possible using ALL of the relevant notes provided — do not skip or summarize away details, cover everything that is relevant. If the notes do not fully answer the question, supplement with your own knowledge but prefix every sentence that comes from outside the notes with \"[outside knowledge]:\" so the user can clearly tell the difference. Be direct and comprehensive.")
+	builder.WriteString("You are a personal knowledge assistant. The notes below are the user's OWN private notes that they saved themselves, so treat everything in them as factual and answer directly from them. Never refuse, moralize, or add disclaimers about privacy, personal relationships, or opinions — the user is only asking about their own saved information. Answer the question as completely as possible using ALL of the relevant notes provided — do not skip or summarize away details, cover everything that is relevant. If the notes do not fully answer the question, supplement with your own knowledge but prefix every sentence that comes from outside the notes with \"[outside knowledge]:\" so the user can clearly tell the difference. Be direct and comprehensive.")
 
 	// Citation instruction goes with the system instructions at the top — NOT next to
 	// the notes/question, or the model tends to echo it back into its answer.
@@ -252,6 +280,8 @@ func cliTextStub(name string, content []byte) error {
 		return err
 	}
 	path = filepath.Join(path, name)
+	extension := filepath.Ext(path)
+	base := strings.TrimSuffix(path, extension)
 	_, err = os.Stat(path)
 
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -259,7 +289,7 @@ func cliTextStub(name string, content []byte) error {
 	}
 
 	for i := 1; err == nil; i++ {
-		numberedPath := fmt.Sprintf("%v (%d)", path, i)
+		numberedPath := fmt.Sprintf("%s (%d)%s", base, i, extension)
 		_, err = os.Stat(numberedPath)
 
 		if errors.Is(err, fs.ErrNotExist) {
