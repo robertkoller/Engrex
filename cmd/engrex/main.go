@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/robertkoller/engrex/internal/daemon"
@@ -250,6 +251,52 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 		},
 	}
 
+	debugEdgesCmd := &cobra.Command{
+		Use:   "debug-edges",
+		Short: "Show each chunk's nearest-neighbor distance for tuning the graph edge threshold",
+		Long:  "Prints, sorted by distance, the closest other chunk to each stored chunk. The smallest distances tell you what edge threshold to set — anything below the threshold becomes a graph edge.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pairs, err := store.NearestDistances()
+			if err != nil {
+				return err
+			}
+			if len(pairs) == 0 {
+				fmt.Println("No chunks stored.")
+				return nil
+			}
+			fmt.Printf("%-10s %-8s %-8s\n", "DISTANCE", "CHUNK", "NEAREST")
+			fmt.Println(strings.Repeat("-", 30))
+			for _, pair := range pairs {
+				fmt.Printf("%-10.4f %-8d %-8d\n", pair.Distance, pair.SourceID, pair.TargetID)
+			}
+			return nil
+		},
+	}
+
+	reindexEdgesCmd := &cobra.Command{
+		Use:   "reindex-edges [threshold]",
+		Short: "Recompute graph edges over existing chunks at a cosine-distance threshold",
+		Long:  "Wipes and rebuilds the relations (graph edges) for all stored chunks using the given distance threshold (default 0.6). Lets you tune the graph without re-adding notes — pair it with `debug-edges` to find a good value.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			threshold := 0.6
+			if len(args) == 1 {
+				value, err := strconv.ParseFloat(args[0], 64)
+				if err != nil {
+					return fmt.Errorf("invalid threshold %q", args[0])
+				}
+				threshold = value
+			}
+			count, err := store.ReindexEdges(threshold)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Rebuilt edges at distance < %.2f: %d edges.\n", threshold, count)
+			return nil
+		},
+	}
+
 	daemonCmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Start the Engrex background daemon",
@@ -271,6 +318,8 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(clearCmd)
 	rootCmd.AddCommand(debugCmd)
+	rootCmd.AddCommand(debugEdgesCmd)
+	rootCmd.AddCommand(reindexEdgesCmd)
 	rootCmd.AddCommand(daemonCmd)
 	return rootCmd
 }

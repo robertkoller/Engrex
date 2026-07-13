@@ -1,0 +1,427 @@
+:root {
+  /* Theme colors — overridden by app.js from URL params to match the macOS app's
+     selected theme. Defaults are the "Aurora" preset. */
+  --c1: #8c5cf5;
+  --c2: #4d99fa;
+  --c3: #47ccc7;
+  --grad: linear-gradient(135deg, var(--c1), var(--c2), var(--c3));
+  --accent: var(--c2);
+
+  --radius: 16px;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* Dark-mode defaults (also the fallback). The page background is transparent so
+     the app's own glass shows through — these are just for panels/text. */
+  --panel-bg: rgba(255, 255, 255, 0.06);
+  --panel-strong: rgba(255, 255, 255, 0.1);
+  --panel-border: rgba(255, 255, 255, 0.12);
+  --panel-border-strong: rgba(255, 255, 255, 0.18);
+  --input-bg: rgba(255, 255, 255, 0.06);
+  --text-0: #f2f3f7;
+  --text-1: #c8ccd6;
+  --text-2: #8b93a3;
+  --label-halo: rgba(10, 12, 18, 0.85);
+  --node-stroke: rgba(0, 0, 0, 0.5);
+  --hover: rgba(255, 255, 255, 0.08);
+  --danger: #ff6b6b;
+  --shadow: 0 16px 44px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --panel-bg: rgba(255, 255, 255, 0.55);
+    --panel-strong: rgba(255, 255, 255, 0.7);
+    --panel-border: rgba(0, 0, 0, 0.08);
+    --panel-border-strong: rgba(0, 0, 0, 0.12);
+    --input-bg: rgba(255, 255, 255, 0.5);
+    --text-0: #1c1c1e;
+    --text-1: #3a3a3c;
+    --text-2: #6b6b70;
+    --label-halo: rgba(255, 255, 255, 0.9);
+    --node-stroke: rgba(255, 255, 255, 0.85);
+    --hover: rgba(0, 0, 0, 0.06);
+    --shadow: 0 14px 36px rgba(0, 0, 0, 0.14);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  /* Transparent so the app's glass window shows through — the graph shares the
+     exact same background material as the search bar above it. */
+  background: transparent;
+  color: var(--text-0);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Graph canvas fills the viewport */
+#graph {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  cursor: grab;
+}
+
+#graph:active {
+  cursor: grabbing;
+}
+
+/* Frosted panels — mirror the app's ultraThinMaterial search bar */
+.glass {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(28px) saturate(1.5);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+}
+
+/* Toolbar */
+.toolbar {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 14px;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-right: 6px;
+}
+
+.brand-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  align-self: center;
+  background: var(--grad);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--c2) 70%, transparent);
+}
+
+.brand-name {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.2px;
+}
+
+.brand-sub {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.search-wrap {
+  flex: 1;
+  max-width: 360px;
+}
+
+.search-input {
+  width: 100%;
+  padding: 9px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-border);
+  background: var(--input-bg);
+  color: var(--text-0);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+.search-input::placeholder {
+  color: var(--text-2);
+}
+
+.search-input:focus {
+  border-color: var(--c2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c2) 22%, transparent);
+}
+
+/* Detail panel */
+.panel {
+  position: fixed;
+  top: 84px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 25;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  padding: 22px;
+  overflow-y: auto;
+  transform: translateX(0);
+  transition: transform 0.32s var(--ease), opacity 0.32s var(--ease);
+}
+
+.panel.hidden {
+  /* Overridden by .hidden display:none, but kept for reference */
+  transform: translateX(20px);
+  opacity: 0;
+}
+
+.panel-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.18s var(--ease);
+}
+
+.panel-close:hover {
+  color: var(--text-0);
+}
+
+.panel-source {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  word-break: break-word;
+  padding-right: 24px;
+}
+
+.panel-source.clickable {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.panel-source.clickable:hover {
+  filter: brightness(1.15);
+}
+
+.panel-body {
+  margin-top: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-0);
+  white-space: pre-wrap;
+}
+
+.ask-btn {
+  margin-top: 18px;
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: none;
+  background: var(--grad);
+  color: #0b0e14;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.2s var(--ease), transform 0.1s var(--ease);
+}
+
+.ask-btn:hover {
+  filter: brightness(1.08);
+}
+
+.ask-btn:active {
+  transform: translateY(1px);
+}
+
+.ask-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ask-result {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--panel-border);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-1);
+}
+
+.ask-result .ask-answer {
+  color: var(--text-0);
+  white-space: pre-wrap;
+}
+
+.ask-result .ask-sources-title {
+  margin-top: 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-2);
+}
+
+.ask-result ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.ask-note {
+  color: var(--c3);
+}
+
+.panel-neighbors {
+  margin-top: 20px;
+}
+
+.panel-neighbors-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-2);
+  margin-bottom: 8px;
+}
+
+.neighbor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.16s var(--ease);
+}
+
+.neighbor:hover {
+  background: var(--hover);
+}
+
+.neighbor-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.neighbor-label {
+  font-size: 13px;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.neighbor-sim {
+  font-size: 11px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Banner */
+.banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  padding: 10px 16px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(180deg, #b23b3b, #8f2f2f);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* Empty state */
+.empty-state {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.empty-icon {
+  font-size: 56px;
+  color: var(--text-2);
+  opacity: 0.5;
+}
+
+.empty-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.empty-sub {
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+/* Loading */
+.loading {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: var(--text-2);
+  pointer-events: none;
+}
+
+/* Graph elements */
+.link {
+  stroke: color-mix(in srgb, var(--c2) 65%, #8090b0);
+  transition: stroke-opacity 0.2s var(--ease);
+}
+
+.node circle {
+  stroke: var(--node-stroke);
+  stroke-width: 1.5px;
+  cursor: pointer;
+  transition: stroke 0.18s var(--ease), stroke-width 0.18s var(--ease);
+}
+
+.node.is-selected circle {
+  stroke: var(--text-0);
+  stroke-width: 2.5px;
+}
+
+.node-label {
+  fill: var(--text-0);
+  font-size: 10px;
+  font-weight: 500;
+  pointer-events: none;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--label-halo);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}

@@ -14,6 +14,7 @@ struct QueryView: View {
     @State private var isStreaming: Bool = false
     @State private var hasSubmitted: Bool = false
     @State private var isUploadMode: Bool = false
+    @State private var isGraphMode: Bool = false
     @State private var isDropTargeted: Bool = false
     @State private var tags: [String] = []
     @State private var sources: [String] = []
@@ -25,6 +26,7 @@ struct QueryView: View {
     private let expandedSize = CGSize(width: 660, height: 480)
     private let expandedWithSourcesSize = CGSize(width: 880, height: 480)
     private let uploadSize = CGSize(width: 640, height: 560)
+    private let graphSize = CGSize(width: 940, height: 660)
 
     // Flags that become chips when typed. Key is the raw flag, value is the chip label.
     private let knownFlags: [(flag: String, label: String)] = [
@@ -45,6 +47,10 @@ struct QueryView: View {
                     dropZone
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .transition(.opacity.combined(with: .move(edge: .top)))
+                } else if isGraphMode {
+                    graphView
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 } else if hasSubmitted {
                     answerArea
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -59,6 +65,7 @@ struct QueryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: hasSubmitted)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isUploadMode)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isGraphMode)
         .onAppear {
             // Delay so the window has become key before requesting focus — otherwise
             // the focus request is dropped and the "color in" animation never fires.
@@ -104,6 +111,16 @@ struct QueryView: View {
             }
             .buttonStyle(.plain)
             .help("Open the Engrex folder")
+
+            Button {
+                setGraphMode(!isGraphMode)
+            } label: {
+                Image(systemName: isGraphMode ? "xmark" : "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(isGraphMode ? AnyShapeStyle(theme.gradient) : AnyShapeStyle(Color.secondary))
+            }
+            .buttonStyle(.plain)
+            .help(isGraphMode ? "Close the graph" : "Open the knowledge graph")
 
             Divider()
                 .frame(height: 22)
@@ -196,6 +213,21 @@ struct QueryView: View {
         if remaining != newValue {
             queryText = remaining
         }
+    }
+
+    private var graphView: some View {
+        Group {
+            if let url = graphURL {
+                GraphWebView(url: url)
+            } else {
+                Color.black.opacity(0.18)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(theme.softGradient, lineWidth: 1)
+        )
     }
 
     private var dropZone: some View {
@@ -371,6 +403,8 @@ struct QueryView: View {
         switch (source as NSString).pathExtension.lowercased() {
         case "pdf":
             return "doc.richtext"
+        case "docx":
+            return "doc.text.fill"
         case "md":
             return "text.alignleft"
         case "html", "htm":
@@ -381,7 +415,10 @@ struct QueryView: View {
     }
 
     private func setUploadMode(_ on: Bool) {
-        withAnimation { isUploadMode = on }
+        withAnimation {
+            isUploadMode = on
+            if on { isGraphMode = false }
+        }
         onUploadModeChanged(on)
         if on {
             isFieldFocused = false
@@ -395,6 +432,42 @@ struct QueryView: View {
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Engrex")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         NSWorkspace.shared.open(url)
+    }
+
+    // The graph URL (served by the daemon on :7778), with the current theme's colors
+    // as params so the embedded graph matches the app.
+    private var graphURL: URL? {
+        var components = URLComponents(string: "http://localhost:7778")!
+        let colors = theme.colors.prefix(3).map { hexString(from: $0) }
+        if colors.count == 3 {
+            components.queryItems = [
+                URLQueryItem(name: "c1", value: colors[0]),
+                URLQueryItem(name: "c2", value: colors[1]),
+                URLQueryItem(name: "c3", value: colors[2]),
+            ]
+        }
+        return components.url
+    }
+
+    private func setGraphMode(_ on: Bool) {
+        withAnimation {
+            isGraphMode = on
+            if on { isUploadMode = false }
+        }
+        if on {
+            isFieldFocused = false
+            onResize(graphSize)
+        } else {
+            onResize(hasSubmitted ? expandedSize : compactSize)
+        }
+    }
+
+    private func hexString(from color: Color) -> String {
+        let nsColor = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(color)
+        let red = Int(round(nsColor.redComponent * 255))
+        let green = Int(round(nsColor.greenComponent * 255))
+        let blue = Int(round(nsColor.blueComponent * 255))
+        return String(format: "%02X%02X%02X", red, green, blue)
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -424,6 +497,9 @@ struct QueryView: View {
         if isUploadMode {
             withAnimation { isUploadMode = false }
             onUploadModeChanged(false)
+        }
+        if isGraphMode {
+            withAnimation { isGraphMode = false }
         }
         onResize(expandedSize)
         withAnimation {
@@ -457,6 +533,7 @@ struct QueryView: View {
             sources = []
             hasSubmitted = false
             isUploadMode = false
+            isGraphMode = false
             tags = []
         }
         isFieldFocused = true

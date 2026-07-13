@@ -8,7 +8,18 @@ Engrex is a local-first AI second brain. Everything you deliberately save — te
 
 ## How It Works
 
-You select text anywhere on your screen and hit a hotkey (`Cmd+Shift+B`). Engrex reads the selection via the macOS Accessibility API, splits it into chunks, embeds each chunk using a local model, and stores the vectors in a local SQLite database. Later, you open the query window with a global hotkey, ask a natural language question, and Engrex retrieves the most relevant chunks from your own content and answers using a local LLM — entirely on-device.
+Capture content any way you like — select text and hit ⌘⇧B, drop a file into
+`~/Engrex/`, or save a web page with the browser extension (⌘⇧E). Engrex splits it
+into overlapping, sentence-aware chunks, embeds each chunk with a local model, and
+stores the vectors in a local SQLite database (via `sqlite-vec`). Later, open the
+query window with ⌘⇧Space (or `engrex query`), ask a natural-language question, and
+Engrex retrieves your most relevant chunks — fusing semantic (vector) and keyword
+(BM25) search — and answers with a local LLM, entirely on-device. Answers come with
+clickable **sources** so you can jump back to the original file or page.
+
+A single background **daemon** owns the database and RAG pipeline and listens on a
+Unix socket (CLI + app), a localhost HTTP endpoint (extension), and a file watcher
+(`~/Engrex/`). Full details in **[docs/](docs/)**.
 
 ---
 
@@ -30,7 +41,7 @@ You select text anywhere on your screen and hit a hotkey (`Cmd+Shift+B`). Engrex
 │              │    Engrex Daemon      │              │
 │              │                       │              │
 │              │  - Chunk & embed      │              │
-│              │  - Vector search      │              │
+│              │  - Hybrid search      │              │
 │              │  - RAG pipeline       │              │
 │              │  - Graph relations    │              │
 │              └───────────┬───────────┘              │
@@ -49,22 +60,25 @@ You select text anywhere on your screen and hit a hotkey (`Cmd+Shift+B`). Engrex
 
 ```
 engrex/
-├── cmd/
-│   └── engrex/
-│       └── main.go        # CLI entry point — cobra root + subcommands
+├── cmd/engrex/           # CLI entry point — cobra commands + the socket client
 ├── internal/
-│   ├── db/
-│   │   └── db.go          # Opens SQLite, loads sqlite-vec, runs migrations
-│   ├── chunker/
-│   │   └── chunker.go     # Splits text into overlapping chunks
-│   ├── embedder/
-│   │   └── ollama.go      # Calls Ollama /api/embed, returns []float32
-│   ├── store/
-│   │   └── store.go       # Inserts chunks + vectors, KNN search
-│   └── rag/
-│       └── rag.go         # Wires chunker + embedder + store + LLM together
+│   ├── db/               # Opens SQLite, loads sqlite-vec + FTS5, runs migrations
+│   ├── chunker/          # Sentence-aware overlapping chunks + size guardrails
+│   ├── embedder/         # Calls Ollama /api/embed, returns []float32
+│   ├── store/            # Insert, hybrid vector+BM25 search, graph edges, re-ingestion, delete
+│   ├── rag/              # Wires chunker + embedder + store + LLM; rank fusion, prompts, sources
+│   ├── ingest/           # Text extraction (md/txt/html/pdf/docx + code/config) + socket↔watcher hand-off
+│   ├── watcher/          # fsnotify watcher on ~/Engrex/
+│   ├── socket/           # Unix socket server (CLI + Swift app)
+│   ├── httpserver/       # localhost HTTP endpoint (browser extension)
+│   └── daemon/           # Ties the three listeners together
+├── ui/                   # Swift menu-bar app (Xcode project)
+├── extension/            # Browser extension (vanilla JS, Manifest V3)
+├── docs/                 # Architecture & component docs
 └── Makefile
 ```
+
+See **[docs/](docs/)** for a full walkthrough of how each part works.
 
 ---
 
@@ -76,6 +90,7 @@ engrex/
 | Embeddings | Ollama — `nomic-embed-text` |
 | LLM | Ollama — `llama3.2` |
 | Vector store | SQLite + `sqlite-vec` |
+| Keyword search | SQLite `FTS5` (BM25) |
 | Menubar + hotkey UI | Swift (Phase 3) |
 | Graph visualization | React + D3 (Phase 5) |
 | Browser extension | Vanilla JS (Phase 4) |
@@ -131,34 +146,42 @@ go mod download
 
 ## Running
 
-### Start Ollama
+### 1. Start Ollama
 
-Ollama must be running before you use Engrex. In Phase 1 you start it manually. In Phase 2 the daemon will manage this automatically.
+Ollama must be running before the daemon starts (the daemon pings it on startup).
 
 ```bash
 ollama serve
 ```
 
-### Install
+### 2. Install and start the daemon
 
 ```bash
-make install
+make install     # builds bin/engrex and installs to /usr/local/bin
+engrex daemon    # run in its own terminal so you see logs; Ctrl+C to stop
 ```
 
-This outputs the binary to `bin/engrex`.
-
-### Use
+### 3. Use it
 
 ```bash
-# Save something to your knowledge base
+# Save something (goes through the daemon)
 engrex add "Go uses goroutines for concurrency, not OS threads"
 
-# Ask a question — streams an answer from your own saved content
+# Ask a question — streams an answer from your own saved content, with sources
 engrex query "how does Go handle concurrency?"
 
-# See all commands
-engrex --help
+# Add date/source citations to the answer
+engrex query "how does Go handle concurrency? --source --date"
+
+# Drop files into ~/Engrex/ to ingest them
+# (.md .txt .html .pdf .docx, plus common code/config files like .go .py .json .csv)
+# Or use the Swift app (⌘⇧Space) and the browser extension (⌘⇧E)
+
+engrex --help    # all commands
 ```
+
+For background auto-start on login, use `make daemon-start` instead of running the
+daemon in a terminal (see [docs/development.md](docs/development.md)).
 
 ---
 
@@ -188,12 +211,13 @@ sqlite3 ~/.engrex/engrex.db "SELECT id, text, created_at FROM chunks;"
 
 | Phase | What it adds | Status |
 |---|---|---|
-| 1 — Core RAG | `engrex add` / `engrex query` from the CLI | In progress |
-| 2 — Passive capture | Background daemon, file watcher, launchd | Planned |
-| 3 — Hotkey UI | Swift menubar app, global hotkeys, query window | Planned |
-| 4 — Smarter ingestion | Browser extension, better chunking, source metadata | Planned |
-| 5 — Knowledge graph | Force-directed graph viz, semantic edges, web UI | Planned |
-| 6 — Privacy + polish | Encryption at rest, exclusion rules, export, forget | Planned |
+| 1 — Core RAG | `engrex add` / `engrex query` from the CLI | ✅ Done |
+| 2 — Passive capture | Background daemon, file watcher, Unix socket, launchd | ✅ Done |
+| 3 — Hotkey UI | Swift menubar app, global hotkeys, query window, sources | ✅ Done |
+| 4 — Smarter ingestion | Browser extension, HTTP endpoint, sentence chunking, source/origin metadata | ✅ Done |
+| 5 — Knowledge graph | Force-directed graph viz, semantic edges, web UI | ✅ Done |
+| 6 — Retrieval & ingestion quality | Hybrid search (BM25 + vector, RRF), document-level re-ingestion, `.docx` + code/config ingestion | ✅ Done |
+| 7 — Privacy (optional) | Encryption at rest | Planned |
 
 ---
 

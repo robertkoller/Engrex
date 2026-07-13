@@ -81,9 +81,18 @@ class QueryWindow: NSPanel {
         panel.prompt = "Add"
         panel.message = "Choose files to ingest into Engrex"
 
+        // Mirror the daemon's ingest.IsSupported list so the browser only offers files
+        // Engrex will actually accept.
         var allowedTypes: [UTType] = [.plainText, .html, .pdf]
-        if let markdown = UTType(filenameExtension: "md") {
-            allowedTypes.append(markdown)
+        let extraExtensions = [
+            "md", "docx",
+            "go", "py", "js", "ts", "java", "c", "cpp", "rs", "sh",
+            "json", "yaml", "yml", "toml", "csv", "tsv", "org", "rst", "tex", "log",
+        ]
+        for fileExtension in extraExtensions {
+            if let type = UTType(filenameExtension: fileExtension) {
+                allowedTypes.append(type)
+            }
         }
         panel.allowedContentTypes = allowedTypes
 

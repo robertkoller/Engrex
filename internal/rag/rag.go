@@ -3,6 +3,8 @@ package rag
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/robertkoller/engrex/internal/chunker"
@@ -23,6 +26,14 @@ const ollamaBaseURL = "http://localhost:11434"
 const generateModel = "llama3.2"
 const DefaultSearchDistance = 0.95
 const DefaultSearchResults = 10
+
+// hybridCandidates is how many results to pull from each of the vector and keyword
+// searches before fusing them down to the final topK.
+const hybridCandidates = 20
+
+// rrfK is the Reciprocal Rank Fusion constant. 60 is the value from the original RRF
+// paper and the de-facto default; larger flattens the contribution of top ranks.
+const rrfK = 60
 
 // RAG wires the embedder, store, and LLM together into the add/query pipeline.
 type RAG struct {
@@ -41,11 +52,22 @@ func New(s *store.Store) (*RAG, error) {
 
 // Add chunks the text, embeds each chunk, and stores them with the given source
 // label and origin (the original path a file was added from; "" when unknown).
+//
+// Documents with a stable identity (files, web pages) are re-ingested as a unit: if the
+// content is unchanged since last time it's skipped outright, otherwise the previous
+// version's chunks are deleted before the new ones are stored — so editing and re-saving
+// a file updates it in place instead of piling up stale, overlapping copies. Typed
+// cli/hotkey notes have no such identity and are always appended (with dedup).
 func (r *RAG) Add(text string, source string, origin string) error {
 	chunks, err := chunker.Chunk(text)
 	if err != nil {
 		return err
 	}
+
+	if key, replaceable := store.DocumentIdentity(source, origin); replaceable {
+		return r.addDocument(text, source, origin, key, chunks)
+	}
+
 	savedCount := 0
 	for _, chunk := range chunks {
 		vector, err := r.embedder.Embed(chunk)
@@ -64,28 +86,81 @@ func (r *RAG) Add(text string, source string, origin string) error {
 		}
 	}
 
-	if _, statErr := os.Stat(source); statErr != nil {
-		if isWebURL(origin) {
-			header := fmt.Sprintf("Title: %s\nSource: %s\n\n", source, origin)
-			name := sanitizeFilename(source) + ".txt"
-			if err := cliTextStub(name, []byte(header+text)); err != nil {
-				log.Printf("failed to write stub file: %v", err)
-			}
-		} else {
-			var title string
-			if len(text) > 20 {
-				title = text[:20]
-			} else {
-				title = text
-			}
-			if err := cliTextStub(fmt.Sprintf("%v.txt", title), []byte(text)); err != nil {
-				log.Printf("failed to write stub file: %v", err)
-			}
-		}
-	}
-
+	r.writeStubIfNeeded(text, source, origin)
 	fmt.Printf("Saved %d chunk(s).\n", savedCount)
 	return nil
+}
+
+// addDocument re-ingests a replaceable document (a file or web page). It skips work
+// when the content hash matches the last ingest, and otherwise deletes the document's
+// previous chunks before storing the fresh ones so nothing stale accumulates.
+func (r *RAG) addDocument(text, source, origin, key string, chunks []string) error {
+	hash := contentHash(text)
+	existing, seen, err := r.store.DocumentHash(key)
+	if err != nil {
+		return err
+	}
+	if seen && existing == hash {
+		fmt.Println("Unchanged since last ingest — skipped.")
+		return nil
+	}
+
+	if _, err := r.store.DeleteBySource(source, origin); err != nil {
+		return err
+	}
+
+	savedCount := 0
+	for _, chunk := range chunks {
+		vector, err := r.embedder.Embed(chunk)
+		if err != nil {
+			return err
+		}
+		if err := r.store.InsertDocumentChunk(chunk, source, origin, vector); err != nil {
+			return err
+		}
+		savedCount++
+	}
+
+	if err := r.store.UpsertDocument(key, hash); err != nil {
+		return err
+	}
+
+	r.writeStubIfNeeded(text, source, origin)
+	fmt.Printf("Saved %d chunk(s).\n", savedCount)
+	return nil
+}
+
+// contentHash returns a hex SHA-256 of the document text, used to detect whether a
+// re-ingested document has actually changed.
+func contentHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// writeStubIfNeeded writes a browsable .txt into ~/Engrex/RawText for content that
+// didn't come from a real file on disk (cli/hotkey text and web captures). Files that
+// already exist on disk get no stub.
+func (r *RAG) writeStubIfNeeded(text, source, origin string) {
+	if _, statErr := os.Stat(source); statErr == nil {
+		return
+	}
+	if isWebURL(origin) {
+		header := fmt.Sprintf("Title: %s\nSource: %s\n\n", source, origin)
+		name := sanitizeFilename(source) + ".txt"
+		if err := cliTextStub(name, []byte(header+text)); err != nil {
+			log.Printf("failed to write stub file: %v", err)
+		}
+		return
+	}
+	var title string
+	if len(text) > 20 {
+		title = text[:20]
+	} else {
+		title = text
+	}
+	if err := cliTextStub(fmt.Sprintf("%v.txt", title), []byte(text)); err != nil {
+		log.Printf("failed to write stub file: %v", err)
+	}
 }
 
 // DebugSearch embeds the question and returns all chunks with raw distances, no filtering.
@@ -106,10 +181,21 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 		return err
 	}
 
-	chunks, err := r.store.Search(queryVec, maxDistance, topK)
+	// Hybrid retrieval: pull a wide candidate set from vector (semantic) search and BM25
+	// (keyword) search, then fuse their rankings so both exact-term and semantic matches
+	// surface. Keyword search is skipped when the query has no usable terms.
+	vectorHits, err := r.store.Search(queryVec, maxDistance, hybridCandidates)
 	if err != nil {
 		return err
 	}
+	var keywordHits []store.Chunk
+	if ftsQuery := toFTSQuery(question); ftsQuery != "" {
+		keywordHits, err = r.store.KeywordSearch(ftsQuery, hybridCandidates)
+		if err != nil {
+			return err
+		}
+	}
+	chunks := fuseRRF(vectorHits, keywordHits, topK)
 
 	if err := json.NewEncoder(out).Encode(map[string][]string{"sources": collectSources(chunks)}); err != nil {
 		return err
@@ -153,6 +239,56 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 	}
 	fmt.Fprintln(out)
 	return nil
+}
+
+// toFTSQuery turns a raw user question into a safe FTS5 MATCH expression. Each word is
+// wrapped in double quotes so punctuation and reserved words (AND/OR/NEAR) are treated as
+// literal search terms instead of query syntax, and the terms are OR'd together to
+// maximize recall — rank fusion sorts out relevance afterward. Returns "" when there are
+// no usable terms, in which case the caller skips keyword search.
+func toFTSQuery(raw string) string {
+	var terms []string
+	for _, field := range strings.Fields(raw) {
+		field = strings.ReplaceAll(field, `"`, `""`) // escape embedded quotes
+		terms = append(terms, `"`+field+`"`)
+	}
+	return strings.Join(terms, " OR ")
+}
+
+// fuseRRF merges the vector and keyword result lists with Reciprocal Rank Fusion: each
+// list contributes 1/(rrfK + rank) to a chunk's score, so chunks ranked highly by either
+// method — and especially by both — rise to the top. It fuses ranks rather than raw
+// scores because cosine distance and BM25 live on different, incomparable scales. When a
+// chunk appears in both lists the vector copy is kept (it carries the distance).
+func fuseRRF(vectorHits, keywordHits []store.Chunk, topK int) []store.Chunk {
+	scoreByID := make(map[int64]float64)
+	chunkByID := make(map[int64]store.Chunk)
+	var order []int64 // first-seen order, so ties stay deterministic
+
+	consume := func(hits []store.Chunk) {
+		for rank, chunk := range hits {
+			if _, seen := chunkByID[chunk.ID]; !seen {
+				chunkByID[chunk.ID] = chunk
+				order = append(order, chunk.ID)
+			}
+			scoreByID[chunk.ID] += 1.0 / float64(rrfK+rank+1)
+		}
+	}
+	consume(vectorHits)
+	consume(keywordHits)
+
+	sort.SliceStable(order, func(i, j int) bool {
+		return scoreByID[order[i]] > scoreByID[order[j]]
+	})
+
+	fused := make([]store.Chunk, 0, len(order))
+	for _, id := range order {
+		fused = append(fused, chunkByID[id])
+	}
+	if len(fused) > topK {
+		fused = fused[:topK]
+	}
+	return fused
 }
 
 // collectSources returns the deduplicated real-file sources of the retrieved chunks,
