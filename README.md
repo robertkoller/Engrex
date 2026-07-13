@@ -199,4 +199,4 @@ sqlite3 ~/.engrex/engrex.db "SELECT id, text, created_at FROM chunks;"
 
 ## Notes
 
-I built this project alongside Claude, which helped plan the architecture and explain concepts. All working code was written by hand as a way to learn systems design in Go.
+I built this project using claude as a helper to plan the systems design and exaplain new concepts for me. All working backend code was written by hand (by me) as a way to learn systems design in Go. Majority of frontend code was written by claude.
