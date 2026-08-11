@@ -29,6 +29,7 @@ type Chunk struct {
 	Origin    string
 	CreatedAt time.Time
 	Distance  float64
+	Score     float64
 }
 
 // Store wraps the database and exposes chunk insert and search operations.
@@ -628,9 +629,9 @@ func isInteger(s string) (int, bool) {
 	return 0, false
 }
 
-// documentKey groups chunks into documents: files/pages by their path or URL, and
+// DocumentKey groups chunks into documents: files/pages by their path or URL, and
 // each typed note (cli/hotkey) on its own so unrelated notes don't collapse together.
-func documentKey(source, origin string, chunkID int64) string {
+func DocumentKey(source, origin string, chunkID int64) string {
 	if origin != "" {
 		return origin
 	}
@@ -663,11 +664,12 @@ func (store *Store) GraphData() (Graph, error) {
 			return Graph{}, err
 		}
 
-		key := documentKey(source, origin, id)
+		key := DocumentKey(source, origin, id)
 		node, exists := nodesByKey[key]
 		if !exists {
 			node = &GraphNode{
 				ID:        id,
+				Key:       key,
 				Label:     graphLabel(text, source, origin),
 				Source:    source,
 				Open:      openableSource(source, origin),
@@ -770,11 +772,13 @@ func graphLabel(text, source, origin string) string {
 
 type GraphNode struct {
 	ID        int64     `json:"id"`
+	Key       string    `json:"key"`
 	Label     string    `json:"label"`
 	Source    string    `json:"source"`
 	Open      string    `json:"open"` // openable path/URL, or "" when there's nothing to open
 	CreatedAt time.Time `json:"createdAt"`
 	Text      string    `json:"text"`
+	Depth     int       `json:"depth,omitempty"`
 }
 
 // openableSource returns the path or URL to open for a document, or "" when there's

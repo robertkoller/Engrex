@@ -55,6 +55,10 @@ knowledge graph. Deleting chunks (via `Delete` or `DeleteBySource`) also removes
 edges that touch them, so the table never keeps rows pointing at ids that no longer
 exist.
 
+Edges are recorded **once, at insert time** — nothing recomputes similarity on read.
+Both the web UI's graph and the MCP `query_knowledge_graph` tool read this table through
+`store.GraphData`, so they cannot disagree about what is connected to what.
+
 ### `fts_chunks` — the full-text (BM25) index
 
 ```sql
@@ -90,6 +94,11 @@ its extracted text at last ingest. This is what lets a re-saved file be skipped 
 unchanged, or have its old chunks replaced when it changed — see
 [ingestion.md](ingestion.md#re-ingestion-editing-a-file-in-place). Typed CLI/hotkey
 notes have no stable identity and get no row here.
+
+`doc_key` doubles as the **document id** exposed by the MCP tools — it is what
+`search_notes` returns and `get_document` accepts, and `hash` is surfaced as
+`ingestion_hash` so a caller can tell whether a document has changed since it last read
+it. Documents with no row (typed notes) report an empty hash. See [mcp.md](mcp.md).
 
 ## Why sqlite-vec
 

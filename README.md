@@ -69,8 +69,11 @@ engrex/
 │   ├── rag/              # Wires chunker + embedder + store + LLM; rank fusion, prompts, sources
 │   ├── ingest/           # Text extraction (md/txt/html/pdf/docx + code/config) + socket↔watcher hand-off
 │   ├── watcher/          # fsnotify watcher on ~/Engrex/
-│   ├── socket/           # Unix socket server (CLI + Swift app)
+│   ├── socket/           # Unix socket server (CLI + Swift app) + read-only MCP commands
 │   ├── httpserver/       # localhost HTTP endpoint (browser extension)
+│   ├── mcpserver/        # MCP stdio server — read-only tools bridged to the daemon
+│   ├── protocol/         # Socket wire types + error codes shared by daemon and clients
+│   ├── config/           # ~/.engrex/config.json (the MCP toggle)
 │   └── daemon/           # Ties the three listeners together
 ├── ui/                   # Swift menu-bar app (Xcode project)
 ├── extension/            # Browser extension (vanilla JS, Manifest V3)
@@ -91,6 +94,8 @@ See **[docs/](docs/)** for a full walkthrough of how each part works.
 | LLM | Ollama — `llama3.2` |
 | Vector store | SQLite + `sqlite-vec` |
 | Keyword search | SQLite `FTS5` (BM25) |
+| PDF text extraction | PDFium via `go-pdfium` (WebAssembly, no cgo) |
+| MCP interface | `modelcontextprotocol/go-sdk` (stdio) |
 | Menubar + hotkey UI | Swift (Phase 3) |
 | Graph visualization | React + D3 (Phase 5) |
 | Browser extension | Vanilla JS (Phase 4) |
@@ -185,6 +190,90 @@ daemon in a terminal (see [docs/development.md](docs/development.md)).
 
 ---
 
+## MCP (Claude Desktop and other MCP clients)
+
+Engrex speaks the [Model Context Protocol](https://modelcontextprotocol.io), so an MCP
+client can search your knowledge base as a tool. It is a fourth interface onto the same
+daemon — alongside the Unix socket, the HTTP endpoint, and the file watcher — not a
+second copy of the pipeline: every tool call is forwarded over the daemon's existing
+socket, so an MCP client gets the exact same hybrid retrieval the CLI does.
+
+**This stays local.** The MCP server talks over stdio to a child process that the client
+spawns; it binds no port and accepts no network connections. Nothing leaves the machine.
+
+### Enable it
+
+Off by default — MCP is local-only, but it is still another way into your notes, so you
+have to opt in:
+
+```bash
+engrex mcp enable    # writes mcp_enabled: true to ~/.engrex/config.json
+engrex mcp status    # check the current state
+engrex mcp disable   # revoke it; takes effect on the next request, no restart needed
+```
+
+### Claude Desktop config
+
+Add this to `~/Library/Application Support/Claude/claude_desktop_config.json`, then
+restart Claude Desktop. Use the absolute path — the app is not launched from your shell,
+so it does not inherit your `PATH`.
+
+```json
+{
+  "mcpServers": {
+    "engrex": {
+      "command": "/usr/local/bin/engrex",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+`engrex daemon` must be running; the MCP process is only a bridge to it.
+
+### The tools
+
+All three are read-only. Ingestion, deletion, and re-indexing are deliberately not
+exposed — letting a model write to your knowledge base is a separate trust decision, and
+if write tools are ever added they will sit behind their own explicit opt-in rather than
+arriving with this one.
+
+| Tool | Input | Returns |
+|---|---|---|
+| `search_notes` | `query` (required), `limit` (default 10, max 50) | Ranked chunks with `document_id`, path, chunk index, snippet, and RRF score |
+| `get_document` | `document_id` **or** `path` | Full text plus format, size, last-modified, and the ingestion hash |
+| `query_knowledge_graph` | `node_id` **or** `document_id`, `depth` (default 1, max 5) | The neighboring documents recorded at insert time, with edge distances |
+
+Chaining works off `document_id`: search, then fetch the source or walk out to what sits
+near it in embedding space.
+
+```jsonc
+// search_notes
+{"query": "how are vector and keyword results combined?", "limit": 3}
+// → {"count": 2, "results": [{"rank": 1, "document_id": "/Users/you/Engrex/rrf-notes.md",
+//     "chunk_id": 2, "chunk_index": 0, "score": 0.0328, "snippet": "..."}, ...]}
+
+// get_document
+{"document_id": "/Users/you/Engrex/rrf-notes.md"}
+// → {"format": "md", "content_source": "file", "size_bytes": 370,
+//     "ingestion_hash": "73f36b9a...", "content": "..."}
+
+// query_knowledge_graph
+{"document_id": "/Users/you/Engrex/rrf-notes.md", "depth": 1}
+// → {"root_node_id": 2, "nodes": [{"node_id": 1, "depth": 1, ...}],
+//     "edges": [{"source_node_id": 1, "target_node_id": 2, "distance": 0.876}]}
+```
+
+Failures come back as MCP tool errors led by a stable code, so a client can tell them
+apart without reading prose: `invalid_input`, `not_found`, `index_unavailable` (an
+ingestion is mid-flight — retry), `embedder_unavailable` (Ollama is down), `mcp_disabled`,
+`daemon_unavailable`, `internal_error`. An empty result set is **not** an error — a
+search that matches nothing returns `count: 0`.
+
+Full details in [docs/mcp.md](docs/mcp.md).
+
+---
+
 ## Development
 
 Always use `make` instead of bare `go` commands. The Makefile sets the correct CGo flags to link against Homebrew's SQLite, which is required for sqlite-vec to work on macOS.
@@ -217,7 +306,8 @@ sqlite3 ~/.engrex/engrex.db "SELECT id, text, created_at FROM chunks;"
 | 4 — Smarter ingestion | Browser extension, HTTP endpoint, sentence chunking, source/origin metadata | ✅ Done |
 | 5 — Knowledge graph | Force-directed graph viz, semantic edges, web UI | ✅ Done |
 | 6 — Retrieval & ingestion quality | Hybrid search (BM25 + vector, RRF), document-level re-ingestion, `.docx` + code/config ingestion | ✅ Done |
-| 7 — Privacy (optional) | Encryption at rest | Planned |
+| 7 — MCP interface | Read-only `search_notes` / `get_document` / `query_knowledge_graph` tools over stdio for Claude Desktop | ✅ Done |
+| 8 — Privacy (optional) | Encryption at rest | Planned |
 
 ---
 

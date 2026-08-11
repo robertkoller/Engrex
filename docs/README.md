@@ -13,6 +13,7 @@ These docs explain how each part works.
 | [rag-pipeline.md](rag-pipeline.md) | Chunking, embedding, hybrid retrieval (vector + BM25, rank fusion), prompt building, and streaming answers |
 | [ingestion.md](ingestion.md) | Every way content gets in: CLI, hotkey, file watcher, browser extension — supported file types, re-ingestion, origin metadata, and RawText stubs |
 | [daemon.md](daemon.md) | The background daemon and its three servers (Unix socket, HTTP, file watcher) |
+| [mcp.md](mcp.md) | The MCP interface: the three read-only tools, the trust boundary, and Claude Desktop setup |
 | [ui.md](ui.md) | The Swift menu-bar app: hotkeys, the query window, themes, file upload |
 | [development.md](development.md) | Building, installing, testing, the launchd agent, and the macOS gotchas |
 

@@ -47,9 +47,17 @@ make daemon-logs    # tail ~/.engrex/daemon.log
 
 The plist is `~/Library/LaunchAgents/com.robertkoller.engrex.plist`. It runs
 `engrex daemon` at login. **Don't** run the launchd daemon and a foreground
-`engrex daemon` at the same time — they'd both try to bind `~/.engrex/daemon.sock`.
+`engrex daemon` at the same time — they'd both try to bind `~/.engrex/daemon.sock`, and
+the loser fails silently because `socket.Start`'s error is discarded by the goroutine
+that launches it.
+
 Note the daemon needs Ollama running; if Ollama is down at login the daemon exits and
-launchd may restart-loop it.
+`KeepAlive` restart-loops it. Start Ollama at login too (`brew services start ollama`).
+
+The plist is **not checked into the repo** — a fresh clone has nothing for
+`make daemon-start` to load. Its contents, and the full boot-survival checklist (Ollama →
+daemon → verify), are in [mcp.md](mcp.md#permanent-setup-surviving-a-reboot). That
+section is written for MCP but the daemon half applies to every interface.
 
 ## Typical dev loop
 
@@ -82,7 +90,26 @@ recreate.
 sqlite3 ~/.engrex/engrex.db "SELECT id, source, origin, created_at FROM chunks;"
 lsof -nP -iTCP:7777 -sTCP:LISTEN     # is the HTTP endpoint up?
 launchctl list | grep engrex          # is the launchd daemon loaded?
+engrex mcp status                     # is the MCP interface enabled?
 ```
+
+## Working on MCP
+
+The socket is the seam, so you can test the daemon half without an MCP client at all:
+
+```bash
+# hit a read-only command directly (requires `engrex mcp enable`)
+echo '{"type":"search","text":"goroutines","limit":3}' | nc -U ~/.engrex/daemon.sock
+```
+
+For the MCP half, drive `engrex mcp serve` with raw JSON-RPC — keep stdin open past the
+last request, since the SDK's stdio transport tears the session down on EOF. Full recipe
+in [mcp.md](mcp.md#verifying-by-hand).
+
+To test without touching your real knowledge base, point `HOME` at a scratch directory:
+`HOME=/tmp/engrex-test engrex daemon`. Keep the path **short** — macOS caps Unix socket
+paths at ~104 bytes, and a long one makes the daemon fail to bind with no visible error
+(`socket.Start`'s error is discarded by the goroutine that launches it).
 
 ## The Swift app & browser extension
 
@@ -101,8 +128,11 @@ internal/chunker/      sentence-aware chunking + guardrails
 internal/rag/          the pipeline: add / query, rank fusion, prompts, sources, stubs
 internal/ingest/       text extraction (md/txt/html/pdf/docx + code/config) + the socket/watcher hand-off registry
 internal/watcher/      fsnotify watcher on ~/Engrex/
-internal/socket/       Unix socket server
+internal/socket/       Unix socket server (+ readonly.go: the search/document/graph commands)
 internal/httpserver/   localhost HTTP endpoint for the extension
+internal/mcpserver/    MCP stdio server — read-only tools bridged to the daemon socket
+internal/protocol/     socket wire types + error codes, shared by the daemon and clients
+internal/config/       ~/.engrex/config.json (currently just the MCP toggle)
 internal/daemon/       ties the three listeners together
 ui/                    the Swift menu-bar app (Xcode project)
 extension/             the browser extension (vanilla JS, MV3)

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/robertkoller/engrex/internal/ingest"
+	"github.com/robertkoller/engrex/internal/protocol"
 	"github.com/robertkoller/engrex/internal/rag"
 	"github.com/robertkoller/engrex/internal/store"
 )
@@ -22,16 +23,8 @@ type Socket struct {
 	listener net.Listener
 }
 
-// Json for the command recieved by daemon
-type Command struct {
-	Type   string `json:"type"`
-	Text   string `json:"text"`
-	Source string `json:"source"`
-}
-
-type Response struct {
-	Error string `json:"error,omitempty"`
-}
+type Command = protocol.Command
+type Response = protocol.Response
 
 // New returns a Socket that will handle commands using the given RAG pipeline and store.
 func New(ragPipeline *rag.RAG, store *store.Store) *Socket {
@@ -81,6 +74,8 @@ func (socket *Socket) handleConnection(conn net.Conn) {
 	}
 
 	switch command.Type {
+	case protocol.CommandSearch, protocol.CommandDocument, protocol.CommandGraph:
+		socket.handleReadOnly(conn, command)
 	case "add":
 		if err := socket.rag.Add(command.Text, command.Source, ""); err != nil {
 			if err := json.NewEncoder(conn).Encode(Response{Error: err.Error()}); err != nil {

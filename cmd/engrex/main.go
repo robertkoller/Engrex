@@ -108,6 +108,16 @@ func sendCommand(command socketCommand) error {
 // Registers the `add` and `query` subcommands via cobra and delegates to rag.
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		root := &cobra.Command{Use: "engrex", Short: "Your memory, on your machine"}
+		root.AddCommand(mcpCommand())
+		root.SetArgs(os.Args[1:])
+		if err := root.Execute(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		log.Fatal(err)
@@ -321,5 +331,6 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 	rootCmd.AddCommand(debugEdgesCmd)
 	rootCmd.AddCommand(reindexEdgesCmd)
 	rootCmd.AddCommand(daemonCmd)
+	rootCmd.AddCommand(mcpCommand())
 	return rootCmd
 }

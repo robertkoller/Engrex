@@ -31,28 +31,16 @@ wires together the chunker, embedder, and store.
 
 1. **Parse flags** — `parseQueryFlags` pulls `--date` / `--source` out of the question
    so they don't pollute the embedding, and records them as options.
-2. **Embed the question** into a query vector.
-3. **Hybrid retrieve** — two searches run over the same chunks and their rankings are
-   fused:
-   - **Vector** (`store.Search`) — KNN over `vec_chunks`, semantic matches within
-     `maxDistance` (cosine).
-   - **Keyword** (`store.KeywordSearch`) — BM25 full-text over the `fts_chunks` FTS5
-     index, catching exact terms, proper nouns, and IDs that embeddings smear over. The
-     raw question is first turned into a safe MATCH expression by `toFTSQuery` (each word
-     quoted and OR'd, so punctuation and reserved words can't break the query); an empty
-     result skips keyword search.
-   - **Fuse** (`fuseRRF`) — each list contributes `1/(60 + rank)` to a chunk's score, so
-     results ranked highly by either method — and especially both — rise to the top. Ranks
-     are fused rather than raw scores, because cosine distance and BM25 aren't comparable.
-   The fused list is capped at `topK`.
-4. **Emit sources first** — the daemon writes `{"sources":[...]}` as the first line of
+2. **Retrieve** — hand off to [`rag.Retrieve`](#retrieval-path-ragretrievequestion-maxdistance-topk),
+   which embeds the question and returns the fused chunk list.
+3. **Emit sources first** — the daemon writes `{"sources":[...]}` as the first line of
    the response (the deduped list of linkable file paths / URLs), then the answer.
    This is how the UI shows a clickable sources panel. See [the wire protocol](#query-wire-protocol).
-5. **Build the prompt** — if chunks were found, `buildPrompt` assembles the system
+4. **Build the prompt** — if chunks were found, `buildPrompt` assembles the system
    instructions + the retrieved chunks (with their date/source) + the question. If
    nothing relevant was found, `buildNoContextPrompt` asks the model to answer from
    general knowledge and label it `[outside knowledge]:`.
-6. **Stream** — the prompt goes to Ollama's `/api/generate` with `"stream": true`, and
+5. **Stream** — the prompt goes to Ollama's `/api/generate` with `"stream": true`, and
    tokens are written to `out` (the socket connection) as they arrive.
 
 ### Query wire protocol
@@ -67,6 +55,42 @@ A query response over the socket is:
 The newline after the JSON is the delimiter. Clients read the first line as sources,
 then treat the rest as the streaming answer. The CLI and the Swift `SocketClient`
 both implement this split.
+
+Note this applies to `query` only. The read-only `search`/`document`/`graph` commands
+used by MCP reply with a single JSON object and no stream — see
+[daemon.md](daemon.md#1-unix-socket--internalsocket).
+
+## Retrieval path: `rag.Retrieve(question, maxDistance, topK)`
+
+Retrieval is factored out of `Query` so it can be used without generation. `Query` calls
+it, and so does the MCP `search_notes` tool ([mcp.md](mcp.md)) — which means **every
+interface ranks results identically**, and there is no second implementation to drift.
+Anything that needs chunks rather than an answer should call this.
+
+1. **Embed the question** into a query vector.
+2. **Hybrid retrieve** — two searches run over the same chunks and their rankings are
+   fused:
+   - **Vector** (`store.Search`) — KNN over `vec_chunks`, semantic matches within
+     `maxDistance` (cosine).
+   - **Keyword** (`store.KeywordSearch`) — BM25 full-text over the `fts_chunks` FTS5
+     index, catching exact terms, proper nouns, and IDs that embeddings smear over. The
+     raw question is first turned into a safe MATCH expression by `toFTSQuery` (each word
+     quoted and OR'd, so punctuation and reserved words can't break the query); an empty
+     result skips keyword search.
+   - **Fuse** (`fuseRRF`) — each list contributes `1/(60 + rank)` to a chunk's score, so
+     results ranked highly by either method — and especially both — rise to the top. Ranks
+     are fused rather than raw scores, because cosine distance and BM25 aren't comparable.
+   The fused list is capped at `topK`. Each returned chunk carries its RRF `Score`
+   alongside its vector `Distance`; `Distance` is `0` for chunks only the keyword search
+   found.
+
+### Reassembling a document from its chunks
+
+Because chunks overlap by design, joining a document's chunks naively repeats every
+seam. `store.stitchChunks` trims the longest exact overlap between each consecutive pair
+before joining. This is what the MCP `get_document` tool falls back to for web captures
+and typed notes; documents still present on disk are re-read from the file instead, which
+is more faithful (chunking normalizes whitespace).
 
 ## Chunking
 

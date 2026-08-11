@@ -64,3 +64,36 @@ file-system-synchronized groups, so new `.swift` files in
 reopen the project if a freshly added file isn't found). The app must be **de-
 sandboxed** (`ENABLE_APP_SANDBOX = NO`) for global hotkeys, accessibility, and socket
 access, and it needs Accessibility permission granted for ⌘⇧B.
+
+## Keeping the icon in the menu bar
+
+**`make install` has nothing to do with this app.** It builds and installs the Go binary
+(`/usr/local/bin/engrex`) only — the Makefile never touches Xcode or
+`/Applications/EngrexUI.app`. If the menu-bar icon disappears after a `make install`,
+the two are unrelated: the app simply isn't running.
+
+The app is `LSUIElement: true`, so it has **no Dock icon and no window** — the menu-bar
+icon is the only sign it's alive. When it's not running there is nothing to notice.
+
+```bash
+open -a EngrexUI                 # start it now
+pgrep -fl EngrexUI               # confirm it's running
+```
+
+It does **not** start at login by default. To make it permanent:
+
+```bash
+osascript -e 'tell application "System Events" to make login item \
+  at end with properties {path:"/Applications/EngrexUI.app", hidden:true}'
+```
+
+Or System Settings → General → Login Items → **+** → `EngrexUI`. Verify with:
+
+```bash
+osascript -e 'tell application "System Events" to get the name of every login item'
+```
+
+The app is only a client — it needs `engrex daemon` running to do anything, and the
+daemon needs Ollama. For the full boot-survival chain see
+[mcp.md](mcp.md#permanent-setup-surviving-a-reboot); that section is written for MCP, but
+the Ollama → daemon ordering applies to this app too.

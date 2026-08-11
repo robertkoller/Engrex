@@ -172,30 +172,36 @@ func (r *RAG) DebugSearch(question string) ([]store.Chunk, error) {
 	return r.store.RawSearch(queryVec)
 }
 
-// Query embeds the question, retrieves the top-K most relevant chunks,
-// builds a RAG prompt, and streams the LLM response to stdout.
-func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK int) error {
-	question, options := parseQueryFlags(question)
+func (r *RAG) Retrieve(question string, maxDistance float64, topK int) ([]store.Chunk, error) {
 	queryVec, err := r.embedder.Embed(question)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Hybrid retrieval: pull a wide candidate set from vector (semantic) search and BM25
-	// (keyword) search, then fuse their rankings so both exact-term and semantic matches
-	// surface. Keyword search is skipped when the query has no usable terms.
 	vectorHits, err := r.store.Search(queryVec, maxDistance, hybridCandidates)
 	if err != nil {
-		return err
+		return nil, err
 	}
+
 	var keywordHits []store.Chunk
 	if ftsQuery := toFTSQuery(question); ftsQuery != "" {
 		keywordHits, err = r.store.KeywordSearch(ftsQuery, hybridCandidates)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	chunks := fuseRRF(vectorHits, keywordHits, topK)
+	return fuseRRF(vectorHits, keywordHits, topK), nil
+}
+
+// Query embeds the question, retrieves the top-K most relevant chunks,
+// builds a RAG prompt, and streams the LLM response to stdout.
+func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK int) error {
+	question, options := parseQueryFlags(question)
+
+	chunks, err := r.Retrieve(question, maxDistance, topK)
+	if err != nil {
+		return err
+	}
 
 	if err := json.NewEncoder(out).Encode(map[string][]string{"sources": collectSources(chunks)}); err != nil {
 		return err
@@ -283,7 +289,9 @@ func fuseRRF(vectorHits, keywordHits []store.Chunk, topK int) []store.Chunk {
 
 	fused := make([]store.Chunk, 0, len(order))
 	for _, id := range order {
-		fused = append(fused, chunkByID[id])
+		chunk := chunkByID[id]
+		chunk.Score = scoreByID[id]
+		fused = append(fused, chunk)
 	}
 	if len(fused) > topK {
 		fused = fused[:topK]

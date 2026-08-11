@@ -10,8 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-
-	"github.com/ledongthuc/pdf"
 )
 
 const minFileSize = 20
@@ -107,28 +105,6 @@ func ExtractText(path string) (string, error) {
 	default:
 		return "", nil
 	}
-}
-
-func extractPDF(path string) (string, error) {
-	file, reader, err := pdf.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	var builder strings.Builder
-	for pageIndex := 1; pageIndex <= reader.NumPage(); pageIndex++ {
-		page := reader.Page(pageIndex)
-		if page.V.IsNull() {
-			continue
-		}
-		text, err := page.GetPlainText(nil)
-		if err != nil {
-			continue
-		}
-		builder.WriteString(text)
-	}
-	return builder.String(), nil
 }
 
 // extractDOCX pulls the body text out of a .docx file. A .docx is a ZIP archive whose

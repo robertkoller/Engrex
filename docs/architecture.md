@@ -6,29 +6,38 @@ Engrex is not one program — it's a long-running **daemon** plus a set of thin
 **clients** that talk to it, and **Ollama** doing the heavy ML.
 
 ```
-        CLI (engrex ...)            Swift menu-bar app          Browser extension
-              │                            │                           │
-              │ Unix socket                │ Unix socket               │ HTTP POST
-              │ ~/.engrex/daemon.sock      │                           │ 127.0.0.1:7777
-              └──────────────┬─────────────┴───────────────┬───────────┘
-                             ▼                              ▼
-                     ┌───────────────────────────────────────────┐
-                     │              Engrex daemon                 │
-                     │  socket listener · HTTP server · watcher   │
-                     │  ─────────────────────────────────────────│
-                     │  rag: chunk → embed → store / search → LLM │
-                     └───────────────┬─────────────────┬──────────┘
-                                     │                 │
-                          SQLite + sqlite-vec     Ollama (localhost:11434)
-                          ~/.engrex/engrex.db     embeddings + generation
+    MCP client              CLI             Swift menu-bar app     Browser extension
+ (Claude Desktop)       (engrex ...)
+        │ stdio               │                     │                      │
+        ▼                     │                     │                      │
+ engrex mcp serve             │                     │                      │
+        │                     │                     │                      │
+        └──────────┬──────────┴─────────────────────┘                      │
+                   │ Unix socket ~/.engrex/daemon.sock                     │ HTTP POST
+                   │                                                       │ 127.0.0.1:7777
+                   └──────────────────────┬────────────────────────────────┘
+                                          ▼
+                         ┌───────────────────────────────────────────┐
+                         │              Engrex daemon                 │
+                         │  socket listener · HTTP server · watcher   │
+                         │  ─────────────────────────────────────────│
+                         │  rag: chunk → embed → store / search → LLM │
+                         └───────────────┬─────────────────┬──────────┘
+                                         │                 │
+                              SQLite + sqlite-vec     Ollama (localhost:11434)
+                              ~/.engrex/engrex.db     embeddings + generation
 ```
 
 - **Daemon** — a single Go process (`engrex daemon`). It owns the SQLite database
   and the RAG pipeline, and runs three concurrent listeners (see [daemon.md](daemon.md)).
-- **Clients** — the CLI, the Swift app, and the browser extension. None of them touch
-  the database or Ollama directly for writes/queries; they send the daemon a command
-  and render what comes back. (The CLI's read-only `list`/`clear`/`debug` are the
+- **Clients** — the CLI, the Swift app, the browser extension, and MCP clients. None of
+  them touch the database or Ollama directly for writes/queries; they send the daemon a
+  command and render what comes back. (The CLI's read-only `list`/`clear`/`debug` are the
   exception — they open the DB directly.)
+- **MCP bridge** — `engrex mcp serve` is the odd one out: it is a *client*, not a
+  listener. An MCP client spawns it as a child process and talks to it over stdio; it
+  translates tool calls into read-only socket commands. It holds no database handle, so
+  the daemon stays the single SQLite owner. Off by default; see [mcp.md](mcp.md).
 - **Ollama** — a separate local server. Engrex calls it for embeddings (`/api/embed`)
   and for answer generation (`/api/generate`).
 
@@ -72,12 +81,31 @@ Take `engrex query "how does X work?"`:
 
 See [rag-pipeline.md](rag-pipeline.md) for the details of each step.
 
+## Data flow: an MCP tool call
+
+Take `search_notes` from Claude Desktop:
+
+1. Claude Desktop has already spawned `engrex mcp serve` and completed the MCP
+   handshake over the child process's stdin/stdout.
+2. The tool handler forwards `{"type":"search","text":"…","limit":10}` over the same
+   Unix socket the CLI uses.
+3. The daemon checks the `mcp_enabled` toggle, then calls `rag.Retrieve` — the retrieval
+   half of `rag.Query`, factored out so both paths rank identically. There is no
+   MCP-specific search.
+4. The ranked chunks come back as structured JSON (document id, path, chunk index,
+   snippet, RRF score) rather than prose, so the model can chain into `get_document` or
+   `query_knowledge_graph`.
+
+The difference from a CLI query is only what happens after retrieval: the CLI feeds the
+chunks to the LLM, MCP hands them to the calling model. See [mcp.md](mcp.md).
+
 ## Where things live on disk
 
 | Path | What |
 |---|---|
 | `~/.engrex/engrex.db` | The SQLite database (chunks + vectors) |
-| `~/.engrex/daemon.sock` | The Unix socket the CLI/app connect to |
+| `~/.engrex/daemon.sock` | The Unix socket the CLI/app/MCP bridge connect to |
+| `~/.engrex/config.json` | User settings — currently just the MCP toggle (optional; defaults apply when absent) |
 | `~/Engrex/` | The watched "inbox" — drop files here to ingest them |
 | `~/Engrex/RawText/` | `.txt` stubs of CLI/hotkey/web captures, for browsing (not watched) |
 | `~/Library/LaunchAgents/com.robertkoller.engrex.plist` | Optional launchd agent for auto-start |

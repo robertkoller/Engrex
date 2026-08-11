@@ -29,7 +29,7 @@ created or written there, after a 500ms debounce it's ingested:
 - `ingest.ExtractText(path)` reads the file and returns plain text based on type.
 - Supported types (`ingest.IsSupported`):
   - `.md` (markdown stripped), `.html`/`.htm` (tags stripped)
-  - `.pdf` (text extracted via `ledongthuc/pdf`)
+  - `.pdf` (text extracted via PDFium, see [PDF extraction](#pdf-extraction))
   - `.docx` (unzipped and its WordprocessingML flattened to text — stdlib only, no
     dependency; see `extractDOCX`)
   - Plain-text and code/config files read as-is: `.txt`, `.go`, `.py`, `.js`, `.ts`,
@@ -45,6 +45,69 @@ non-recursive), so the `.txt` stubs written there are never re-ingested.
 Because you'll edit and re-save watched files, the watcher fires on the same path
 repeatedly. Engrex handles that with document-level re-ingestion rather than blindly
 appending — see [Re-ingestion](#re-ingestion-editing-a-file-in-place) below.
+
+## PDF extraction
+
+`internal/ingest/pdf.go`. PDFs are the one format where extraction is genuinely hard: a
+PDF stores positioned glyphs, not sentences, so the spaces you see on screen are usually
+*gaps* rather than space characters. The reader has to reconstruct word boundaries from
+glyph geometry.
+
+Engrex uses **PDFium** — the engine Chrome uses — through
+[`go-pdfium`](https://github.com/klippa-app/go-pdfium), compiled to WebAssembly and run
+via wazero. WebAssembly rather than the cgo build keeps this dependency-free: nothing to
+`brew install`, and it builds with `CGO_ENABLED=0`.
+
+### Why not a pure-Go reader
+
+`ledongthuc/pdf` was used originally and **silently produced unusable text** on ordinary
+academic PDFs. On a CVPR paper it returned every glyph at the same X coordinate with zero
+width and zero font size:
+
+```
+ROW y=675  elements=463
+  [0] S="Deep"      X=153.45 W=0.00 FontSize=0.00
+  [1] S="Residual"  X=153.45 W=0.00 FontSize=0.00
+```
+
+With no widths there is nothing to infer spacing from, so the text came out as
+`DeepResidualLearningforImageRecognitionKaimingHe…` — 1,015 tokens averaging 35.9
+characters. `dslipak/pdf`, a fork of the same engine, was worse. PDFium reads the same
+file correctly: 7,082 tokens averaging 5.2 characters.
+
+The damage was not limited to readability. The chunker counts words by whitespace, so a
+9-page paper looked like ~1,000 words and became 6 oversized chunks instead of 21; BM25
+recall collapsed, because a merged run of words is a single unsearchable token
+(`residual` matched 1 chunk before the fix, 17 after).
+
+### Cost
+
+Compiling the PDFium WebAssembly module takes several seconds, so the instance pool is
+built **lazily on the first PDF** and reused for the life of the process. Ingesting no
+PDFs costs nothing; the long-lived daemon pays it once. Extraction itself is fast
+(~300 ms for 9 pages). The pool holds one instance, so concurrent PDF ingests queue.
+
+### If you change extractors
+
+Stored chunks keep whatever text was extracted at ingest time, so you have to re-ingest
+to pick up an improvement. **Re-ingest the same way the document was originally added**,
+or you will get a duplicate rather than a replacement — see
+[Re-ingestion](#re-ingestion-editing-a-file-in-place) for why.
+
+To find what is actually stored and under which key:
+
+```bash
+sqlite3 "file:$HOME/.engrex/engrex.db?mode=ro" -header -column \
+  "SELECT COALESCE(NULLIF(origin,''),source) AS doc_key, COUNT(*) AS chunks,
+          MIN(id) AS first_id, MAX(id) AS last_id
+   FROM chunks GROUP BY doc_key;"
+```
+
+If a stale copy is already there, delete it by id range and keep the fresh one:
+
+```bash
+engrex delete 1-6
+```
 
 ## 4. Browser extension — ⌘⇧E
 
@@ -98,6 +161,27 @@ the append-with-dedup behavior described above.
 > Existing files ingested before this behavior existed have no `documents` row yet, so
 > the first edit-and-save of each one takes the replace path and cleans out any stale
 > duplicate chunks left over from earlier saves.
+
+### The identity trap: the same file can become two documents
+
+Replacement only happens when the **document key matches**, and the key depends on *how*
+the file was added, not on where its bytes are:
+
+| How it was added | `source` | `origin` | Document key |
+|---|---|---|---|
+| App / `addfile` (copies into `~/Engrex/`) | `~/Engrex/paper.pdf` | `~/Downloads/paper.pdf` | `~/Downloads/paper.pdf` |
+| Dropped straight into `~/Engrex/` (watcher) | `~/Engrex/paper.pdf` | *(empty)* | `~/Engrex/paper.pdf` |
+
+Both rows describe the same bytes in the same place, but they hash to different keys. So
+copying a file into `~/Engrex/` that was originally added through the app does **not**
+replace it — the watcher sees no origin, derives a different key, and stores a second
+document. You end up with one entry labelled `Downloads/paper.pdf` and another labelled
+`Engrex/paper.pdf`, the first holding the older text.
+
+Nothing is corrupted when this happens, but retrieval now has two copies competing, and
+the stale one can outrank the fresh one. Check with the `doc_key` query in
+[If you change extractors](#if-you-change-extractors) and delete the outdated id range
+with `engrex delete`.
 
 ## Source vs origin
 
