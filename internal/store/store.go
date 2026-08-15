@@ -19,7 +19,9 @@ import (
 var ErrInvalidDelete = errors.New("Invalid delete syntax. Use engrex delete ?, ?, ?-?, etc...")
 
 const maxEdges = 8
-const edgeThreshold = 0.8
+const DefaultEdgeThreshold = 0.32
+
+const edgeThreshold = DefaultEdgeThreshold
 
 // Chunk is a row returned from search.
 type Chunk struct {
@@ -30,6 +32,40 @@ type Chunk struct {
 	CreatedAt time.Time
 	Distance  float64
 	Score     float64
+
+	// Structural metadata, populated by the section-aware chunker. Chunks stored before
+	// the chunker preserved structure carry zero values here.
+	HeadingPath string
+	ChunkIndex  int
+	DocTitle    string
+	ContentType string
+}
+
+// Metadata is the structural context the chunker derives for a chunk: where it sits in
+// its document and how it was split.
+type Metadata struct {
+	HeadingPath string
+	ChunkIndex  int
+	DocTitle    string
+	ContentType string
+}
+
+// chunkColumns is the column list every chunk-returning query selects, so the scan
+// order in scanChunk stays valid across all of them.
+const chunkColumns = `id, text, source, origin, created_at, heading_path, chunk_index, doc_title, content_type`
+
+// scanChunk reads one row selected with chunkColumns, optionally preceded by a
+// distance column. Keeping the scan in one place is what stops the column list and the
+// scan targets drifting apart as metadata columns get added.
+func scanChunk(rows *sql.Rows, chunk *Chunk, withDistance bool) error {
+	targets := []any{}
+	if withDistance {
+		targets = append(targets, &chunk.Distance)
+	}
+	targets = append(targets,
+		&chunk.ID, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt,
+		&chunk.HeadingPath, &chunk.ChunkIndex, &chunk.DocTitle, &chunk.ContentType)
+	return rows.Scan(targets...)
 }
 
 // Store wraps the database and exposes chunk insert and search operations.
@@ -42,11 +78,14 @@ func New(database *db.DB) *Store {
 	return &Store{db: database}
 }
 
-const deduplicationThreshold = 0.35
+// deduplicationThreshold is the cosine distance under which a new chunk counts as a
+// near-duplicate of one already stored. Converted from L2 0.35 — see the note on
+// DefaultEdgeThreshold for the derivation.
+const deduplicationThreshold = 0.061
 
 // Insert writes a text chunk and its embedding vector to the database.
 // Returns true if inserted, false if skipped as a near-duplicate.
-func (store *Store) Insert(text, source, origin string, vec []float32) (bool, error) {
+func (store *Store) Insert(text, source, origin string, vec []float32, metadata Metadata) (bool, error) {
 	blob, _ := json.Marshal(vec)
 
 	var nearestDistance float64
@@ -60,7 +99,7 @@ func (store *Store) Insert(text, source, origin string, vec []float32) (bool, er
 		return false, nil
 	}
 
-	if err := store.insertChunk(text, source, origin, string(blob)); err != nil {
+	if err := store.insertChunk(text, source, origin, string(blob), metadata); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -70,20 +109,24 @@ func (store *Store) Insert(text, source, origin string, vec []float32) (bool, er
 // check. Used when re-ingesting a whole document (which is deleted and rewritten as a
 // unit): every chunk must be stored even if it resembles a chunk in another document,
 // otherwise a re-ingested file could silently lose chunks to the cross-document dedup.
-func (store *Store) InsertDocumentChunk(text, source, origin string, vec []float32) error {
+func (store *Store) InsertDocumentChunk(text, source, origin string, vec []float32, metadata Metadata) error {
 	blob, _ := json.Marshal(vec)
-	return store.insertChunk(text, source, origin, string(blob))
+	return store.insertChunk(text, source, origin, string(blob), metadata)
 }
 
 // insertChunk writes one chunk + its vector in a transaction, then links it to its
 // nearest neighbors. blob is the JSON-encoded embedding.
-func (store *Store) insertChunk(text, source, origin, blob string) error {
+func (store *Store) insertChunk(text, source, origin, blob string, metadata Metadata) error {
 	tx, err := store.db.Begin()
 	if err != nil {
 		return err
 	}
 
-	response, err := tx.Exec(`INSERT INTO chunks(text, source, origin) VALUES (?, ?, ?)`, text, source, origin)
+	response, err := tx.Exec(`
+		INSERT INTO chunks(text, source, origin, heading_path, chunk_index, doc_title, content_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		text, source, origin,
+		metadata.HeadingPath, metadata.ChunkIndex, metadata.DocTitle, metadata.ContentType)
 	if err != nil {
 		tx.Rollback() //nolint:errcheck
 		return err
@@ -105,10 +148,50 @@ func (store *Store) insertChunk(text, source, origin, blob string) error {
 	return nil
 }
 
+// SchemaVersion reports the migration version the underlying database is at.
+func (store *Store) SchemaVersion() (int, error) {
+	return store.db.SchemaVersion()
+}
+
+// IndexCounts returns how many chunks exist and how many have vectors. A mismatch
+// means the vector index is stale — usually a migration that dropped it, needing a
+// reindex.
+func (store *Store) IndexCounts() (chunks int, vectors int, err error) {
+	if err = store.db.QueryRow(`SELECT count(*) FROM chunks`).Scan(&chunks); err != nil {
+		return 0, 0, err
+	}
+	if err = store.db.QueryRow(`SELECT count(*) FROM vec_chunks`).Scan(&vectors); err != nil {
+		return 0, 0, err
+	}
+	return chunks, vectors, nil
+}
+
+// ReplaceVector overwrites one chunk's embedding in place, leaving the chunk row and
+// its metadata untouched. Used by reindexing, where the text is unchanged but the way
+// it gets embedded has changed.
+func (store *Store) ReplaceVector(id int64, vec []float32) error {
+	blob, _ := json.Marshal(vec)
+
+	tx, err := store.db.Begin()
+	if err != nil {
+		return err
+	}
+	// vec0 has no UPSERT, so the old row goes first.
+	if _, err := tx.Exec(`DELETE FROM vec_chunks WHERE rowid = ?`, id); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)`, id, string(blob)); err != nil {
+		tx.Rollback() //nolint:errcheck
+		return err
+	}
+	return tx.Commit()
+}
+
 // List returns every chunk in the database ordered by most recent first.
 func (store *Store) List() ([]Chunk, error) {
 	rows, err := store.db.Query(`
-		SELECT id, text, source, origin, created_at
+		SELECT ` + chunkColumns + `
 		FROM chunks
 		ORDER BY created_at DESC`)
 	if err != nil {
@@ -119,7 +202,7 @@ func (store *Store) List() ([]Chunk, error) {
 	var chunks []Chunk
 	for rows.Next() {
 		var chunk Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt); err != nil {
+		if err := scanChunk(rows, &chunk, false); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, chunk)
@@ -133,16 +216,19 @@ func (store *Store) List() ([]Chunk, error) {
 // Clear drops and recreates the tables, wiping all data and rebuilding the schema.
 func (store *Store) Clear() error {
 	// Drop the FTS index first, then the content table (which also drops its triggers).
-	if _, err := store.db.Exec(`DROP TABLE IF EXISTS fts_chunks`); err != nil {
-		return err
+	drops := []string{
+		`DROP TABLE IF EXISTS fts_chunks`,
+		`DROP TABLE IF EXISTS vec_chunks`,
+		`DROP TABLE IF EXISTS chunks`,
+		`DROP TABLE IF EXISTS relations`,
+		`DROP TABLE IF EXISTS documents`,
 	}
-	if _, err := store.db.Exec(`DROP TABLE IF EXISTS vec_chunks`); err != nil {
-		return err
+	for _, statement := range drops {
+		if _, err := store.db.Exec(statement); err != nil {
+			return err
+		}
 	}
-	if _, err := store.db.Exec(`DROP TABLE IF EXISTS chunks`); err != nil {
-		return err
-	}
-	return store.db.Migrate()
+	return store.db.Rebuild()
 }
 
 // KeywordSearch runs a BM25 full-text search over chunk text via the FTS5 index and
@@ -151,7 +237,7 @@ func (store *Store) Clear() error {
 // punctuation can't be misread as query syntax.
 func (store *Store) KeywordSearch(query string, limit int) ([]Chunk, error) {
 	rows, err := store.db.Query(`
-		SELECT c.id, c.text, c.source, c.origin, c.created_at
+		SELECT `+prefixed("c", chunkColumns)+`
 		FROM fts_chunks
 		JOIN chunks c ON c.id = fts_chunks.rowid
 		WHERE fts_chunks MATCH ?
@@ -165,7 +251,7 @@ func (store *Store) KeywordSearch(query string, limit int) ([]Chunk, error) {
 	var chunks []Chunk
 	for rows.Next() {
 		var chunk Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt); err != nil {
+		if err := scanChunk(rows, &chunk, false); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, chunk)
@@ -547,21 +633,63 @@ func getDeletionIDs(args string) ([]any, error) {
 
 }
 
-// RawSearch returns all chunks with their raw distances, no filtering applied.
-// Used for calibrating distance thresholds.
-func (store *Store) RawSearch(vec []float32) ([]Chunk, error) {
+// DefaultRawSearchLimit is how many neighbors `engrex debug` pulls when showing raw
+// distances for threshold calibration.
+const DefaultRawSearchLimit = 20
+
+// RawSearch returns the nearest chunks with their raw distances, no distance filtering
+// applied. Used for calibrating thresholds.
+func (store *Store) RawSearch(vec []float32, limit int) ([]Chunk, error) {
+	if limit <= 0 {
+		limit = DefaultRawSearchLimit
+	}
+	return store.knn(vec, limit)
+}
+
+// Search performs a K Nearest Neighbors search and returns the chunks within
+// maxDistance, closest first.
+//
+// The KNN limit is topK rather than a fixed number, so asking for a wider candidate
+// pool actually widens it. The distance filter is applied to those topK results, which
+// means a tight maxDistance returns fewer than topK rather than reaching further down
+// the neighbor list — filtering is a quality floor here, not a way to backfill.
+func (store *Store) Search(vec []float32, maxDistance float64, topK int) ([]Chunk, error) {
+	if topK <= 0 {
+		return nil, nil
+	}
+
+	neighbors, err := store.knn(vec, topK)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]Chunk, 0, len(neighbors))
+	for _, chunk := range neighbors {
+		if chunk.Distance <= maxDistance {
+			filtered = append(filtered, chunk)
+		}
+	}
+	return filtered, nil
+}
+
+// knn runs the vector nearest-neighbor query and joins each hit back to its chunk row.
+// The LIMIT is bound rather than interpolated — vec0 needs it to size the KNN search,
+// so it is the one place where "how many results" is a real query parameter instead of
+// a post-filter.
+func (store *Store) knn(vec []float32, limit int) ([]Chunk, error) {
 	jsonVector, _ := json.Marshal(vec)
 
 	rows, err := store.db.Query(`
-		SELECT v.rowid, v.distance, c.text, c.source, c.origin, c.created_at
+		SELECT v.distance, `+prefixed("c", chunkColumns)+`
 		FROM (
 			SELECT rowid, distance
 			FROM vec_chunks
 			WHERE embedding MATCH ?
 			ORDER BY distance
-			LIMIT 20
+			LIMIT ?
 		) v
-		JOIN chunks c ON c.id = v.rowid`, string(jsonVector))
+		JOIN chunks c ON c.id = v.rowid
+		ORDER BY v.distance`, string(jsonVector), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +698,7 @@ func (store *Store) RawSearch(vec []float32) ([]Chunk, error) {
 	var chunks []Chunk
 	for rows.Next() {
 		var chunk Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.Distance, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt); err != nil {
+		if err := scanChunk(rows, &chunk, true); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, chunk)
@@ -578,47 +706,14 @@ func (store *Store) RawSearch(vec []float32) ([]Chunk, error) {
 	return chunks, rows.Err()
 }
 
-// Search performs a K Nearest Neighbors search for the most similar chunks
-// I like maxDistance to be 0.95 dont ask me how i chose that its just feeling
-func (store *Store) Search(vec []float32, maxDistance float64, topK int) ([]Chunk, error) {
-	jsonVector, _ := json.Marshal(vec)
-
-	rows, err := store.db.Query(`
-	SELECT v.rowid, v.distance, c.text, c.source, c.origin, c.created_at
-	FROM (
-		SELECT rowid, distance
-		FROM vec_chunks
-		WHERE embedding MATCH ?
-		ORDER BY distance
-		LIMIT 20
-	) v
-	JOIN chunks c ON c.id = v.rowid`, string(jsonVector))
-
-	if err != nil {
-		return nil, err
+// prefixed qualifies each column in a comma-separated list with a table alias, so
+// chunkColumns can be reused in queries that join and would otherwise be ambiguous.
+func prefixed(alias, columns string) string {
+	parts := strings.Split(columns, ", ")
+	for index, part := range parts {
+		parts[index] = alias + "." + part
 	}
-
-	defer rows.Close()
-
-	var outputChunks []Chunk
-	for rows.Next() {
-		var chunk Chunk
-		err := rows.Scan(&chunk.ID, &chunk.Distance, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt)
-		if err != nil {
-			return nil, err
-		}
-		if chunk.Distance <= maxDistance {
-			outputChunks = append(outputChunks, chunk)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(outputChunks) > topK {
-		outputChunks = outputChunks[:topK]
-	}
-	return outputChunks, nil
+	return strings.Join(parts, ", ")
 }
 
 func isInteger(s string) (int, bool) {

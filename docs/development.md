@@ -79,19 +79,65 @@ re-run it (a running process doesn't pick up a new binary).
 
 ## Schema changes
 
-`clear` drops and recreates the tables (not just `DELETE`), so it rebuilds the schema
-— run `engrex clear` after adding a column to pick it up on an existing DB. There's no
-migration framework; either `clear`, or delete `~/.engrex/engrex.db` and let it
-recreate.
+There **is** a migration framework now — `PRAGMA user_version` with an ordered,
+forward-only list in `internal/db/db.go`, one transaction per step. To add a column:
+
+1. Append a `migration` entry with the next version number. **Never edit or reorder a
+   shipped entry** — databases in the field would disagree with the code about what
+   that version means.
+2. Bump the `SchemaVersion` constant.
+3. If the new column feeds chunk queries, add it to `chunkColumns` and `scanChunk` in
+   `internal/store/store.go` — every chunk-returning query shares both, which is what
+   stops the column list and scan targets drifting apart.
+
+`engrex clear` still drops and rebuilds everything via `db.Rebuild()`, which resets
+`user_version` to 0 first so the migrations re-run.
+
+Anything that changes how text is *embedded* (model, task prefixes, normalization)
+invalidates every stored vector — old vectors sit in a different space from new query
+vectors. Run `engrex reindex` to re-embed from the chunk text already in the database;
+nothing is re-read from disk and ids, sources, and metadata are preserved.
+
+## Testing
+
+```bash
+make test                                   # all packages
+go test -tags libsqlite3 ./internal/hnsw/   # one package
+go test -tags libsqlite3 -run TestRecall -v ./internal/hnsw/
+```
+
+Tests that need Ollama (`internal/rag`, `internal/store` integration cases) **skip**
+rather than fail when it isn't reachable, so the suite is green offline. The
+`rerank`/`rewrite`/`verify` packages test against an `httptest` server serving canned
+completions, so they never need a real model.
 
 ## Inspecting state
 
 ```bash
-sqlite3 ~/.engrex/engrex.db "SELECT id, source, origin, created_at FROM chunks;"
+sqlite3 ~/.engrex/engrex.db "SELECT id, source, origin, chunk_index, content_type FROM chunks;"
+sqlite3 ~/.engrex/engrex.db "PRAGMA user_version;"   # schema version
 lsof -nP -iTCP:7777 -sTCP:LISTEN     # is the HTTP endpoint up?
 launchctl list | grep engrex          # is the launchd daemon loaded?
 engrex mcp status                     # is the MCP interface enabled?
+engrex doctor                         # embedding + index health, schema version
+ollama ps                             # which models are resident, and their unload timer
 ```
+
+## Diagnosing a bad answer
+
+Work outward from the data, not inward from the model. The order that matters:
+
+```bash
+engrex doctor                          # is the index even consistent?
+engrex debug "your question"           # what did retrieval actually return?
+engrex debug-prompt "your question"    # what did the model actually receive?
+```
+
+`debug-prompt` is the one that saves the most time — it separates *"the model was given
+the wrong context"* from *"the model was given the right context and answered badly"*,
+two failures that look identical from the answer alone. A long stretch of this project
+was spent blaming a model for ignoring instructions it had never received, because
+Ollama was silently truncating them away.
 
 ## Working on MCP
 
@@ -121,20 +167,48 @@ paths at ~104 bytes, and a long one makes the daemon fail to bind with no visibl
 
 ```
 cmd/engrex/            CLI entry point (cobra) + the socket client used by the CLI
-internal/db/           SQLite open + migrate (sqlite-vec + FTS5)
+                       main.go / mcp.go / eval.go (eval, ask, reindex, doctor,
+                       debug-prompt) / bench.go (bench-hnsw)
+internal/db/           SQLite open + versioned migrations (sqlite-vec + FTS5)
 internal/store/        insert, hybrid vector+BM25 search, graph edges, re-ingestion, delete
-internal/embedder/     Ollama /api/embed client
-internal/chunker/      sentence-aware chunking + guardrails
-internal/rag/          the pipeline: add / query, rank fusion, prompts, sources, stubs
-internal/ingest/       text extraction (md/txt/html/pdf/docx + code/config) + the socket/watcher hand-off registry
+internal/embedder/     Ollama /api/embed client — task prefixes + unit normalization
+internal/chunker/      chunker.go: sentence packing + the sentence splitter
+                       document.go: structure-aware markdown/code chunking
+internal/rag/          the pipeline: add / query, rank fusion, prompts, context sizing
+internal/ingest/       text extraction (md/txt/html/pdf/docx + code/config), content-type
+                       classification, and the socket/watcher hand-off registry
+internal/eval/         golden set, recall@k / MRR scoring, baselines, report rendering
+internal/hnsw/         from-scratch HNSW index + its benchmark harness
+internal/rerank/       Reranker interface + listwise LLM implementation
+internal/rewrite/      query decomposition and expansion
+internal/verify/       claim extraction + per-claim entailment against passages
 internal/watcher/      fsnotify watcher on ~/Engrex/
 internal/socket/       Unix socket server (+ readonly.go: the search/document/graph commands)
 internal/httpserver/   localhost HTTP endpoint for the extension
 internal/mcpserver/    MCP stdio server — read-only tools bridged to the daemon socket
 internal/protocol/     socket wire types + error codes, shared by the daemon and clients
-internal/config/       ~/.engrex/config.json (currently just the MCP toggle)
+internal/config/       ~/.engrex/config.json — MCP toggle + generation model
 internal/daemon/       ties the three listeners together
+eval/                  golden.json (question set) + baseline.json (committed numbers)
 ui/                    the Swift menu-bar app (Xcode project)
 extension/             the browser extension (vanilla JS, MV3)
 docs/                  you are here
 ```
+
+## Command reference
+
+| Command | What it does |
+|---|---|
+| `add` / `query` / `list` / `delete` / `clear` | Core operations, over the daemon socket |
+| `ask` | Query **in-process** with opt-in stages (`--rerank`, `--rewrite`, `--verify`, `--all`, `--model`, `--top-k`) |
+| `eval` | Score retrieval against the golden set (`--rerank`, `--rewrite`, `--save`) |
+| `bench-hnsw` | Benchmark the HNSW index against exact search |
+| `doctor` | Embedding magnitude, schema version, chunk/vector counts |
+| `reindex` | Re-embed every chunk and rebuild graph edges |
+| `debug` / `debug-edges` / `debug-prompt` | Raw distances, edge distribution, assembled prompt |
+| `reindex-edges` | Rebuild graph edges at a given threshold |
+| `daemon` / `mcp` | Run the daemon; manage the MCP interface |
+
+`ask` runs in-process rather than through the daemon deliberately: the optional stages
+are per-invocation experiments, and threading a matrix of flags through the daemon
+protocol would fix a configuration the daemon owns rather than one the caller chooses.

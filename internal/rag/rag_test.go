@@ -90,11 +90,11 @@ func TestHybridSurfacesExactKeyword(t *testing.T) {
 
 	insert := func(text, source string) {
 		t.Helper()
-		vector, err := ragPipeline.embedder.Embed(text)
+		vector, err := ragPipeline.embedder.EmbedDocument(text)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := chunkStore.InsertDocumentChunk(text, source, "", vector); err != nil {
+		if err := chunkStore.InsertDocumentChunk(text, source, "", vector, store.Metadata{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -107,7 +107,7 @@ func TestHybridSurfacesExactKeyword(t *testing.T) {
 	insert("A good naming scheme makes identifiers easy to remember and search.", "/tmp/d3.md")
 
 	question := "ZBQ-7788"
-	queryVec, err := ragPipeline.embedder.Embed(question)
+	queryVec, err := ragPipeline.embedder.EmbedQuery(question)
 	if err != nil {
 		t.Fatal(err)
 	}

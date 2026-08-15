@@ -16,6 +16,10 @@ These docs explain how each part works.
 | [mcp.md](mcp.md) | The MCP interface: the three read-only tools, the trust boundary, and Claude Desktop setup |
 | [ui.md](ui.md) | The Swift menu-bar app: hotkeys, the query window, themes, file upload |
 | [development.md](development.md) | Building, installing, testing, the launchd agent, and the macOS gotchas |
+| [evaluation.md](evaluation.md) | Scoring retrieval quality: the golden set, `engrex eval`, recall@k / MRR, baselines, `doctor` and `reindex` |
+| [retrieval-stages.md](retrieval-stages.md) | The optional stages — query rewriting, reranking, citation verification — and why each is off by default |
+| [hnsw.md](hnsw.md) | The from-scratch HNSW index, its benchmark methodology, and where it does and doesn't beat brute force |
+| [rag-upgrade-plan.md](rag-upgrade-plan.md) | Audit of the current retrieval pipeline and the phased plan to take it to production-grade RAG |
 
 ## Quick mental model
 

@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "Golden set for `engrex eval`. Each case is a question plus the sources that genuinely answer it.",
+    "",
+    "'relevant' entries are matched as SUBSTRINGS of a retrieved chunk's source path or origin URL,",
+    "so 'architecture.md' matches any chunk from that file wherever it lives. Substrings rather than",
+    "exact paths so the set survives files being moved.",
+    "",
+    "'hops': 2 or more marks a question needing evidence from multiple documents. Those cases are",
+    "reported as a separate slice — that split is the evidence for or against multi-hop retrieval.",
+    "",
+    "The cases below are STARTER EXAMPLES written against this repo's own docs/ directory, so the",
+    "harness is runnable immediately. Replace them with questions over your real corpus: aim for ~40",
+    "cases, weighted toward questions you actually ask, and include the ones current retrieval fails.",
+    "A golden set of only easy questions reports a high score and teaches you nothing."
+  ],
+  "cases": [
+    {
+      "question": "what distance threshold does engrex use for deduplication?",
+      "relevant": ["rag-pipeline.md", "data-model.md"],
+      "note": "Exact-value lookup. Should be near-trivial for keyword search via BM25."
+    },
+    {
+      "question": "how does the daemon avoid double-ingesting a file the socket already handled?",
+      "relevant": ["daemon.md", "ingestion.md"],
+      "note": "Mechanism question with a specific answer (the pending-path mark)."
+    },
+    {
+      "question": "what happens when I edit and re-save a file that was already ingested?",
+      "relevant": ["ingestion.md", "rag-pipeline.md"],
+      "note": "Behavioural question; the answer is the content-hash skip plus delete-then-replace."
+    },
+    {
+      "question": "which three servers does the daemon run?",
+      "relevant": ["daemon.md", "architecture.md"],
+      "hops": 2,
+      "note": "Multi-hop: the list is in daemon.md but the why is in architecture.md."
+    },
+    {
+      "question": "how are the knowledge graph edges created and when?",
+      "relevant": ["data-model.md", "rag-pipeline.md"],
+      "hops": 2,
+      "note": "Multi-hop: edge storage is one doc, the insert-time trigger is another."
+    },
+    {
+      "question": "what file formats can engrex ingest?",
+      "relevant": ["ingestion.md"],
+      "note": "Enumeration question. Single obvious source."
+    },
+    {
+      "question": "why does the build need the libsqlite3 tag on macOS?",
+      "relevant": ["development.md"],
+      "note": "Specific gotcha; tests whether narrow technical detail is retrievable."
+    },
+    {
+      "question": "what are the MCP tools and can any of them modify my notes?",
+      "relevant": ["mcp.md"],
+      "note": "Two-part question over one document — a decomposition target for Phase 5."
+    },
+    {
+      "question": "how does hybrid search combine vector and keyword results?",
+      "relevant": ["rag-pipeline.md"],
+      "note": "Concept question. RRF is the answer."
+    },
+    {
+      "question": "reciprocal rank fusion constant",
+      "relevant": ["rag-pipeline.md"],
+      "note": "Keyword-shaped query, not a natural question. Vector search alone tends to do worse here."
+    }
+  ]
+}

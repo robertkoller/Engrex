@@ -71,10 +71,10 @@ func TestResolveAndFetchDocument(t *testing.T) {
 	chunkStore := newTestStore(t)
 
 	const source = "/tmp/engrex-test/notes.md"
-	if err := chunkStore.InsertDocumentChunk("Kettle facts. The water boils.", source, "", testVector(0.10)); err != nil {
+	if err := chunkStore.InsertDocumentChunk("Kettle facts. The water boils.", source, "", testVector(0.10), Metadata{}); err != nil {
 		t.Fatalf("insert first chunk: %v", err)
 	}
-	if err := chunkStore.InsertDocumentChunk("The water boils. Steam rises.", source, "", testVector(0.20)); err != nil {
+	if err := chunkStore.InsertDocumentChunk("The water boils. Steam rises.", source, "", testVector(0.20), Metadata{}); err != nil {
 		t.Fatalf("insert second chunk: %v", err)
 	}
 	if err := chunkStore.UpsertDocument(source, "deadbeef"); err != nil {
@@ -132,7 +132,7 @@ func TestGraphNeighborhoodTrimsByDepth(t *testing.T) {
 	chunkStore := newTestStore(t)
 
 	for index, source := range []string{"/tmp/a.md", "/tmp/b.md", "/tmp/c.md"} {
-		if err := chunkStore.InsertDocumentChunk("body "+source, source, "", testVector(float32(index)*0.5)); err != nil {
+		if err := chunkStore.InsertDocumentChunk("body "+source, source, "", testVector(float32(index)*0.5), Metadata{}); err != nil {
 			t.Fatalf("insert %s: %v", source, err)
 		}
 	}

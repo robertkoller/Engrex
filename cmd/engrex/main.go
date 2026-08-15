@@ -332,5 +332,11 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 	rootCmd.AddCommand(reindexEdgesCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(mcpCommand())
+	rootCmd.AddCommand(evalCommand(rag))
+	rootCmd.AddCommand(reindexCommand(rag))
+	rootCmd.AddCommand(doctorCommand(rag))
+	rootCmd.AddCommand(debugPromptCommand(rag))
+	rootCmd.AddCommand(benchCommand())
+	rootCmd.AddCommand(askCommand(rag))
 	return rootCmd
 }

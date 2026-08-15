@@ -8,10 +8,20 @@ export CGO_LDFLAGS
 
 PLIST := $(HOME)/Library/LaunchAgents/com.robertkoller.engrex.plist
 
-.PHONY: test build install daemon-stop daemon-start daemon-logs
+.PHONY: test build install daemon-stop daemon-start daemon-logs eval eval-save
 
 test:
 	go test -tags $(BUILD_TAGS) ./...
+
+# Retrieval quality against the golden set. Needs Ollama running and a populated
+# database — it really embeds and really retrieves. See docs/evaluation.md.
+eval: build
+	./bin/engrex eval
+
+# Freeze the current numbers as the baseline every later run diffs against. Only run
+# this once a change has been judged an improvement.
+eval-save: build
+	./bin/engrex eval --save --label "$(LABEL)"
 
 build:
 	go build -tags $(BUILD_TAGS) -o bin/engrex ./cmd/engrex

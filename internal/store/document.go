@@ -71,12 +71,14 @@ func (store *Store) ResolveDocumentKey(identifier string) (string, error) {
 
 func documentChunkQuery(key string) (string, []any) {
 	if chunkID, err := strconv.ParseInt(strings.TrimPrefix(key, "chunk:"), 10, 64); err == nil && strings.HasPrefix(key, "chunk:") {
-		return `SELECT id, text, source, origin, created_at FROM chunks WHERE id = ?`, []any{chunkID}
+		return `SELECT ` + chunkColumns + ` FROM chunks WHERE id = ?`, []any{chunkID}
 	}
 
-	return `SELECT id, text, source, origin, created_at FROM chunks
+	// Ordered by chunk_index so a document reassembles in reading order, falling back
+	// to id for rows stored before the chunker recorded an index.
+	return `SELECT ` + chunkColumns + ` FROM chunks
 	        WHERE origin = ? OR (origin = '' AND source = ?)
-	        ORDER BY id`, []any{key, key}
+	        ORDER BY chunk_index, id`, []any{key, key}
 }
 
 func (store *Store) DocumentByKey(key string) (Document, error) {
@@ -91,7 +93,7 @@ func (store *Store) DocumentByKey(key string) (Document, error) {
 	var texts []string
 	for rows.Next() {
 		var chunk Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt); err != nil {
+		if err := scanChunk(rows, &chunk, false); err != nil {
 			return Document{}, err
 		}
 		if len(document.ChunkIDs) == 0 {
@@ -139,7 +141,7 @@ func (store *Store) ChunkOrdinals(key string) (map[int64]int, error) {
 	position := 0
 	for rows.Next() {
 		var chunk Chunk
-		if err := rows.Scan(&chunk.ID, &chunk.Text, &chunk.Source, &chunk.Origin, &chunk.CreatedAt); err != nil {
+		if err := scanChunk(rows, &chunk, false); err != nil {
 			return nil, err
 		}
 		ordinals[chunk.ID] = position

@@ -26,9 +26,10 @@ The text is sent as `{"type":"add","source":"hotkey"}`. A toast confirms the sav
 The daemon watches `~/Engrex/` with `fsnotify` (`internal/watcher`). When a file is
 created or written there, after a 500ms debounce it's ingested:
 
-- `ingest.ExtractText(path)` reads the file and returns plain text based on type.
+- `ingest.ExtractText(path)` reads the file and returns text based on type.
 - Supported types (`ingest.IsSupported`):
-  - `.md` (markdown stripped), `.html`/`.htm` (tags stripped)
+  - `.md`/`.markdown` (inline formatting stripped, **structure kept** — see
+    [Markdown handling](#markdown-handling)), `.html`/`.htm` (tags stripped)
   - `.pdf` (text extracted via PDFium, see [PDF extraction](#pdf-extraction))
   - `.docx` (unzipped and its WordprocessingML flattened to text — stdlib only, no
     dependency; see `extractDOCX`)
@@ -45,6 +46,37 @@ non-recursive), so the `.txt` stubs written there are never re-ingested.
 Because you'll edit and re-save watched files, the watcher fires on the same path
 repeatedly. Engrex handles that with document-level re-ingestion rather than blindly
 appending — see [Re-ingestion](#re-ingestion-editing-a-file-in-place) below.
+
+## Markdown handling
+
+`cleanMarkdown` strips inline formatting noise — emphasis, inline code fences, image
+tags, link URLs (keeping the link text), math delimiters, horizontal rules — while
+**deliberately preserving headings, list markers, and blockquote markers**.
+
+That preservation is the whole point. An earlier version stripped `^#{1,6}\s+` along
+with everything else, which meant that by the time text reached the chunker every
+heading had become an ordinary sentence indistinguishable from body text. Section-aware
+chunking was impossible by construction: there was no structure left to split on.
+
+With headings intact, `chunker.ChunkDocument` can split at section boundaries and give
+every chunk a heading path — see [rag-pipeline.md](rag-pipeline.md#chunking).
+
+## Content type classification
+
+`ingest.ContentType(path)` maps a file to how it should be split:
+
+| Extension | Content type | Split strategy |
+|---|---|---|
+| `.md`, `.markdown` | `markdown` | Heading boundaries, then sentences within a section |
+| `.go`, `.py`, `.js`, `.ts`, `.java`, `.c`, `.cpp`, `.rs`, `.sh`, `.json`, `.yaml`, `.yml`, `.toml`, `.tex` | `code:<language>` | Top-level declarations, line-windowed fallback |
+| everything else | `text` | Sentence packing |
+
+PDF, DOCX, and HTML come back as `text` — whatever structure they had is gone by the
+time extraction has flattened them to prose.
+
+The code path exists because source files must never go through the sentence splitter.
+It breaks on the `.` in method chains, decimals, and version numbers, producing chunks
+that start and end mid-expression.
 
 ## PDF extraction
 

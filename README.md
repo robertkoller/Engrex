@@ -10,12 +10,21 @@ Engrex is a local-first AI second brain. Everything you deliberately save — te
 
 Capture content any way you like — select text and hit ⌘⇧B, drop a file into
 `~/Engrex/`, or save a web page with the browser extension (⌘⇧E). Engrex splits it
-into overlapping, sentence-aware chunks, embeds each chunk with a local model, and
-stores the vectors in a local SQLite database (via `sqlite-vec`). Later, open the
-query window with ⌘⇧Space (or `engrex query`), ask a natural-language question, and
-Engrex retrieves your most relevant chunks — fusing semantic (vector) and keyword
-(BM25) search — and answers with a local LLM, entirely on-device. Answers come with
+with a **structure-aware chunker** — markdown on heading boundaries, code on top-level
+declarations — embeds each chunk with a local model, and stores the vectors in a local
+SQLite database (via `sqlite-vec`). Later, open the query window with ⌘⇧Space (or
+`engrex query`), ask a natural-language question, and Engrex retrieves your most
+relevant chunks — fusing semantic (vector) and keyword (BM25) search with Reciprocal
+Rank Fusion — and answers with a local LLM, entirely on-device. Answers come with
 clickable **sources** so you can jump back to the original file or page.
+
+Three optional stages can wrap that core: **query rewriting** before retrieval,
+**LLM reranking** after it, and **citation verification** after generation. All are
+off by default until measured — see [docs/retrieval-stages.md](docs/retrieval-stages.md).
+
+Retrieval quality is **measured, not assumed**: `engrex eval` scores a golden question
+set on recall@k, MRR, and latency against a committed baseline
+([docs/evaluation.md](docs/evaluation.md)).
 
 A single background **daemon** owns the database and RAG pipeline and listens on a
 Unix socket (CLI + app), a localhost HTTP endpoint (extension), and a file watcher
@@ -62,19 +71,25 @@ Unix socket (CLI + app), a localhost HTTP endpoint (extension), and a file watch
 engrex/
 ├── cmd/engrex/           # CLI entry point — cobra commands + the socket client
 ├── internal/
-│   ├── db/               # Opens SQLite, loads sqlite-vec + FTS5, runs migrations
-│   ├── chunker/          # Sentence-aware overlapping chunks + size guardrails
-│   ├── embedder/         # Calls Ollama /api/embed, returns []float32
+│   ├── db/               # Opens SQLite, loads sqlite-vec + FTS5, versioned migrations
+│   ├── chunker/          # Structure-aware chunking (markdown headings, code declarations)
+│   ├── embedder/         # Ollama /api/embed — task prefixes + unit normalization
 │   ├── store/            # Insert, hybrid vector+BM25 search, graph edges, re-ingestion, delete
-│   ├── rag/              # Wires chunker + embedder + store + LLM; rank fusion, prompts, sources
+│   ├── rag/              # Wires it all together; rank fusion, prompts, context sizing
 │   ├── ingest/           # Text extraction (md/txt/html/pdf/docx + code/config) + socket↔watcher hand-off
+│   ├── eval/             # Golden set, recall@k / MRR scoring, baselines
+│   ├── hnsw/             # From-scratch HNSW approximate nearest-neighbor index + benchmark
+│   ├── rerank/           # Reranker interface + listwise LLM implementation
+│   ├── rewrite/          # Query decomposition and expansion
+│   ├── verify/           # Claim extraction + entailment checking against passages
 │   ├── watcher/          # fsnotify watcher on ~/Engrex/
 │   ├── socket/           # Unix socket server (CLI + Swift app) + read-only MCP commands
 │   ├── httpserver/       # localhost HTTP endpoint (browser extension)
 │   ├── mcpserver/        # MCP stdio server — read-only tools bridged to the daemon
 │   ├── protocol/         # Socket wire types + error codes shared by daemon and clients
-│   ├── config/           # ~/.engrex/config.json (the MCP toggle)
+│   ├── config/           # ~/.engrex/config.json (MCP toggle + generation model)
 │   └── daemon/           # Ties the three listeners together
+├── eval/                 # golden.json (question set) + baseline.json (committed numbers)
 ├── ui/                   # Swift menu-bar app (Xcode project)
 ├── extension/            # Browser extension (vanilla JS, Manifest V3)
 ├── docs/                 # Architecture & component docs
@@ -90,10 +105,13 @@ See **[docs/](docs/)** for a full walkthrough of how each part works.
 | Layer | Technology |
 |---|---|
 | Core daemon | Go |
-| Embeddings | Ollama — `nomic-embed-text` |
-| LLM | Ollama — `llama3.2` |
-| Vector store | SQLite + `sqlite-vec` |
+| Embeddings | Ollama — `nomic-embed-text` (768-dim, asymmetric task prefixes) |
+| LLM | Ollama — configurable; `qwen3:4b` recommended, `llama3.2` default |
+| Vector store | SQLite + `sqlite-vec` (cosine) |
 | Keyword search | SQLite `FTS5` (BM25) |
+| Rank fusion | Reciprocal Rank Fusion (k=60) |
+| ANN index | HNSW, implemented from scratch (benchmarked; exact search remains the default) |
+| Evaluation | Golden set with recall@k, MRR, latency percentiles |
 | PDF text extraction | PDFium via `go-pdfium` (WebAssembly, no cgo) |
 | MCP interface | `modelcontextprotocol/go-sdk` (stdio) |
 | Menubar + hotkey UI | Swift (Phase 3) |
@@ -131,8 +149,26 @@ brew install go sqlite ollama
 
 ```bash
 ollama pull nomic-embed-text   # embedding model (~270MB)
-ollama pull llama3.2           # generation model (~2GB)
+ollama pull qwen3:4b           # generation model (~2.5GB) — recommended
 ```
+
+`qwen3:4b` is the recommended generation model. `llama3.2:3b` is the built-in default
+and uses slightly less memory, but it fails on questions about *which* document you
+saved — it invents plausible-looking sources instead. Measured on the same corpus:
+
+| Model | RAM resident | Names the saved document correctly |
+|---|---|---|
+| `llama3.2:3b` | 3.2 GB | ❌ |
+| `qwen3:4b` | 4.0 GB | ✅ |
+| `qwen3:8b` | 6.4 GB | ✅ (no better than 4b, and slower) |
+
+Point Engrex at it in `~/.engrex/config.json`:
+
+```json
+{ "generate_model": "qwen3:4b" }
+```
+
+Or per-query with `--model`, or per-shell with `ENGREX_GENERATE_MODEL`.
 
 ### 4. Clone the repo
 
@@ -183,6 +219,29 @@ engrex query "how does Go handle concurrency? --source --date"
 # Or use the Swift app (⌘⇧Space) and the browser extension (⌘⇧E)
 
 engrex --help    # all commands
+```
+
+### Advanced retrieval and diagnostics
+
+```bash
+# Ask with the optional stages (runs in-process, not via the daemon)
+engrex ask "your question" --rerank          # rerank retrieved passages
+engrex ask "your question" --rewrite         # decompose multi-part questions
+engrex ask "your question" --verify          # check the answer against your notes
+engrex ask "your question" --all --model qwen3:4b
+
+# Measure retrieval quality
+engrex eval                    # score against the committed baseline
+engrex eval --rerank           # does reranking actually help?
+engrex eval --save --label v1  # freeze this run as the new baseline
+
+# Benchmark the HNSW index against exact search
+engrex bench-hnsw --sizes 1000,5000 --queries 25
+
+# Diagnostics
+engrex doctor                        # embedding health, schema version, index counts
+engrex debug-prompt "your question"  # exactly what the LLM receives
+engrex reindex                       # re-embed everything after an embedding change
 ```
 
 For background auto-start on login, use `make daemon-start` instead of running the
@@ -280,19 +339,30 @@ Always use `make` instead of bare `go` commands. The Makefile sets the correct C
 
 ```bash
 make install   # build the binary to bin/engrex
-make test    # run all tests
+make test      # run all tests
+make eval      # score retrieval against the golden set
 ```
 
 Running `go build` or `go test` directly without the Makefile flags will fail with linker errors on macOS.
 
+Tests that need Ollama **skip** rather than fail when it isn't reachable, so the suite
+is green offline.
+
 ### Database
 
-The database lives at `~/.engrex/engrex.db` and is created automatically on first run. You can inspect it directly:
+The database lives at `~/.engrex/engrex.db` and is created automatically on first run.
+The schema is versioned with `PRAGMA user_version` and migrated forward automatically
+(see [docs/data-model.md](docs/data-model.md)). You can inspect it directly:
 
 ```bash
 sqlite3 ~/.engrex/engrex.db ".tables"
-sqlite3 ~/.engrex/engrex.db "SELECT id, text, created_at FROM chunks;"
+sqlite3 ~/.engrex/engrex.db "PRAGMA user_version;"
+sqlite3 ~/.engrex/engrex.db "SELECT id, source, chunk_index, content_type FROM chunks;"
 ```
+
+⚠️ Anything that changes how text is *embedded* (model, task prefixes, normalization)
+invalidates every stored vector. Run `engrex reindex` after such an upgrade — it
+re-embeds from the chunk text already in the database, preserving ids and metadata.
 
 ---
 
@@ -307,7 +377,27 @@ sqlite3 ~/.engrex/engrex.db "SELECT id, text, created_at FROM chunks;"
 | 5 — Knowledge graph | Force-directed graph viz, semantic edges, web UI | ✅ Done |
 | 6 — Retrieval & ingestion quality | Hybrid search (BM25 + vector, RRF), document-level re-ingestion, `.docx` + code/config ingestion | ✅ Done |
 | 7 — MCP interface | Read-only `search_notes` / `get_document` / `query_knowledge_graph` tools over stdio for Claude Desktop | ✅ Done |
-| 8 — Privacy (optional) | Encryption at rest | Planned |
+| 8 — Production RAG | Eval harness (recall@k / MRR), structure-aware chunking, HNSW from scratch, reranking, query rewriting, citation verification | ✅ Done |
+| 9 — Privacy (optional) | Encryption at rest | Planned |
+
+### Phase 8 in detail
+
+See [docs/rag-upgrade-plan.md](docs/rag-upgrade-plan.md) for the full audit and plan.
+Headlines:
+
+- **Measurement first** — `engrex eval` scores a golden set on recall@k, MRR, and
+  latency against a committed baseline. Every optional stage ships **off by default**
+  until the numbers justify its latency.
+- **Structure-aware chunking** — markdown splits on heading boundaries with each chunk
+  embedded under its full section path; code splits on top-level declarations rather
+  than sentence punctuation.
+- **HNSW from scratch** — layered graph, greedy descent, dual-heap bounded search,
+  neighbor-selection heuristic, degree pruning. Benchmarked against exact KNN, and
+  **exact search stays the default**: at personal-corpus scale brute force is both
+  competitive and lossless. See [docs/hnsw.md](docs/hnsw.md).
+- **Reranking, query rewriting, citation verification** — opt-in stages behind
+  interfaces, each degrading gracefully to the plain pipeline on failure. See
+  [docs/retrieval-stages.md](docs/retrieval-stages.md).
 
 ---
 

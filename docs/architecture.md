@@ -55,12 +55,17 @@ Take `engrex add "some text"` (the hotkey and extension are variations of this):
 
 1. The CLI dials the Unix socket and sends `{"type":"add","text":"some text","source":"cli"}`.
 2. The daemon's socket handler calls `rag.Add(text, source, origin)`.
-3. `rag.Add` runs the text through the **chunker** (sentence-aware, overlapping chunks).
-4. Each chunk is sent to **Ollama** to get a 768-dimension embedding vector.
-5. Each `(text, vector)` pair is written to SQLite — the text into `chunks`, the
-   vector into the `vec_chunks` virtual table — inside a transaction, after a
-   dedup check. (Files and web pages take a document-level re-ingestion path instead;
-   see [ingestion.md](ingestion.md#re-ingestion-editing-a-file-in-place).)
+3. The source is classified (`markdown`, `code:<language>`, or `text`) and run through
+   the **structure-aware chunker** — markdown splits on heading boundaries, code on
+   top-level declarations, everything else on sentences. Each chunk carries its heading
+   path and ordinal.
+4. Each chunk is sent to **Ollama** with the `search_document:` task prefix to get a
+   768-dimension unit-length embedding.
+5. Each `(text, vector, metadata)` triple is written to SQLite — the text and its
+   structural metadata into `chunks`, the vector into the `vec_chunks` virtual table —
+   inside a transaction, after a dedup check. (Files and web pages take a
+   document-level re-ingestion path instead; see
+   [ingestion.md](ingestion.md#re-ingestion-editing-a-file-in-place).)
 6. A `.txt` "stub" of the raw text is written to `~/Engrex/RawText/` for browsing.
 
 ## Data flow: asking a question
@@ -69,15 +74,22 @@ Take `engrex query "how does X work?"`:
 
 1. The CLI sends `{"type":"query","text":"how does X work?"}` over the socket.
 2. The daemon parses any `--date`/`--source` flags out of the question.
-3. The question is embedded via Ollama into a query vector.
+3. The question is embedded via Ollama — with the `search_query:` prefix, which is
+   *different* from the one used for stored text, because the embedding model is
+   asymmetric by design.
 4. **Hybrid retrieval**: a `sqlite-vec` K-nearest-neighbours search over `vec_chunks`
-   (semantic) and a BM25 full-text search over the `fts_chunks` FTS5 index (keyword) run
-   in parallel, and their rankings are merged with Reciprocal Rank Fusion — so exact-term
-   and semantic matches both surface. See [rag-pipeline.md](rag-pipeline.md).
+   (semantic) and a BM25 full-text search over the `fts_chunks` FTS5 index (keyword)
+   run over the same chunks, and their rankings are merged with Reciprocal Rank Fusion —
+   so exact-term and semantic matches both surface.
 5. The daemon sends the list of **source files** back as the first line of the
-   response, then builds a RAG prompt (the retrieved chunks + the question) and
-   streams the LLM's answer token-by-token over the same connection.
+   response, then builds a RAG prompt (grounding rules, a document manifest, the
+   retrieved passages, the question) and streams the LLM's answer token-by-token over
+   the same connection, with the context window sized to the prompt.
 6. The client renders the streaming answer and the clickable sources.
+
+Three optional stages can wrap this — query rewriting before retrieval, reranking
+after it, and citation verification after generation. All are off by default; see
+[retrieval-stages.md](retrieval-stages.md).
 
 See [rag-pipeline.md](rag-pipeline.md) for the details of each step.
 

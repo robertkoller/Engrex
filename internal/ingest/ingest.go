@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/robertkoller/engrex/internal/chunker"
 )
 
 const minFileSize = 20
@@ -42,7 +44,7 @@ func ClaimPending(path string) bool {
 // IsSupported reports whether the file type can be ingested.
 func IsSupported(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".md", ".txt", ".html", ".htm", ".pdf", ".go", ".py", ".js", ".ts", ".java", ".c",
+	case ".md", ".markdown", ".txt", ".html", ".htm", ".pdf", ".go", ".py", ".js", ".ts", ".java", ".c",
 		".cpp", ".rs", ".sh", ".json", ".yaml", ".yml", ".toml", ".csv", ".tsv", ".org", ".rst", ".tex", ".log", ".docx":
 		return true
 	default:
@@ -95,8 +97,8 @@ func ExtractText(path string) (string, error) {
 		return "", nil
 	}
 	switch extension {
-	case ".md":
-		return stripMarkdown(string(content)), nil
+	case ".md", ".markdown":
+		return cleanMarkdown(string(content)), nil
 	case ".txt", ".go", ".py", ".js", ".ts", ".java", ".c",
 		".cpp", ".rs", ".sh", ".json", ".yaml", ".yml", ".toml", ".csv", ".tsv", ".org", ".rst", ".tex", ".log":
 		return string(content), nil
@@ -180,27 +182,67 @@ func parseWordDocument(source io.Reader) (string, error) {
 	return builder.String(), nil
 }
 
-func stripMarkdown(input string) string {
+// Precompiled because ingest runs on every watched file save — recompiling a dozen
+// regexes per file was pure waste.
+var (
+	inlineCodeRegex  = regexp.MustCompile("`([^`]+)`")
+	imageRegex       = regexp.MustCompile(`!\[.*?\]\(.*?\)`)
+	linkRegex        = regexp.MustCompile(`\[(.+?)\]\(.*?\)`)
+	boldStarRegex    = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	boldUnderRegex   = regexp.MustCompile(`__(.+?)__`)
+	italicStarRegex  = regexp.MustCompile(`\*(.+?)\*`)
+	italicUnderRegex = regexp.MustCompile(`_(.+?)_`)
+	displayMathRegex = regexp.MustCompile(`(?s)\$\$(.+?)\$\$`)
+	inlineMathRegex  = regexp.MustCompile(`\$(.+?)\$`)
+	horizontalRegex  = regexp.MustCompile(`(?m)^[-*]{3,}\s*$`)
+)
+
+// cleanMarkdown strips inline formatting noise while leaving the document's structure
+// intact.
+//
+// Headings, list markers, and blockquote markers are deliberately preserved: the
+// chunker splits on headings to build section-aware chunks and heading paths, so
+// stripping them here would make that impossible. Only markup that carries no
+// structure is removed — emphasis, image tags, link URLs (the link text is kept), and
+// math delimiters.
+func cleanMarkdown(input string) string {
 	text := input
 
-	text = regexp.MustCompile("(?s)```[a-zA-Z]*\\n?(.*?)```").ReplaceAllString(text, "$1")
-
-	text = regexp.MustCompile("`([^`]+)`").ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`!\[.*?\]\(.*?\)`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\[(.+?)\]\(.*?\)`).ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`(?m)^#{1,6}\s+`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`\*\*(.+?)\*\*`).ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`__(.+?)__`).ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`\*(.+?)\*`).ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`_(.+?)_`).ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`(?m)^>\s?`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`(?s)\$\$(.+?)\$\$`).ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`\$(.+?)\$`).ReplaceAllString(text, "$1")
-	text = regexp.MustCompile(`(?m)^[-*]{3,}\s*$`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`(?m)^\s*[-*+]\s+`).ReplaceAllString(text, "")
-	text = regexp.MustCompile(`(?m)^\s*\d+\.\s+`).ReplaceAllString(text, "")
+	text = inlineCodeRegex.ReplaceAllString(text, "$1")
+	text = imageRegex.ReplaceAllString(text, "")
+	text = linkRegex.ReplaceAllString(text, "$1")
+	text = boldStarRegex.ReplaceAllString(text, "$1")
+	text = boldUnderRegex.ReplaceAllString(text, "$1")
+	text = italicStarRegex.ReplaceAllString(text, "$1")
+	text = italicUnderRegex.ReplaceAllString(text, "$1")
+	text = displayMathRegex.ReplaceAllString(text, "$1")
+	text = inlineMathRegex.ReplaceAllString(text, "$1")
+	text = horizontalRegex.ReplaceAllString(text, "")
 
 	return text
+}
+
+// codeExtensions maps a file extension to the language name recorded in the chunk's
+// content type, so the chunker knows to split on declarations rather than sentences.
+var codeExtensions = map[string]string{
+	".go": "go", ".py": "python", ".js": "javascript", ".ts": "typescript",
+	".java": "java", ".c": "c", ".cpp": "cpp", ".rs": "rust", ".sh": "shell",
+	".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
+	".tex": "latex",
+}
+
+// ContentType classifies a path for the chunker: "markdown", "code:<language>", or
+// "text". Formats that are converted to plain prose on extraction (PDF, DOCX, HTML)
+// come back as "text" — whatever structure they had is gone by then.
+func ContentType(path string) string {
+	extension := strings.ToLower(filepath.Ext(path))
+	if extension == ".md" || extension == ".markdown" {
+		return chunker.TypeMarkdown
+	}
+	if language, isCode := codeExtensions[extension]; isCode {
+		return chunker.TypeCodePrefix + language
+	}
+	return chunker.TypeText
 }
 
 func stripHTML(input string) string {

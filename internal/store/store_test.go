@@ -63,10 +63,10 @@ func TestDeleteBySourceRemovesChunksVecsAndRelations(t *testing.T) {
 	path := "/tmp/Engrex/doc.md"
 
 	// Two chunks of the same file; identical vectors so relate() links them.
-	if err := store.InsertDocumentChunk("chunk one", path, "", vec768(0.5)); err != nil {
+	if err := store.InsertDocumentChunk("chunk one", path, "", vec768(0.5), Metadata{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.InsertDocumentChunk("chunk two", path, "", vec768(0.5)); err != nil {
+	if err := store.InsertDocumentChunk("chunk two", path, "", vec768(0.5), Metadata{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,10 +99,10 @@ func TestDeleteBySourceRemovesChunksVecsAndRelations(t *testing.T) {
 
 func TestDeleteBySourceScopesToOneDocument(t *testing.T) {
 	store := testStore(t)
-	if err := store.InsertDocumentChunk("page a", "Title A", "https://a.test", vec768(0.3)); err != nil {
+	if err := store.InsertDocumentChunk("page a", "Title A", "https://a.test", vec768(0.3), Metadata{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.InsertDocumentChunk("page b", "Title B", "https://b.test", vec768(0.9)); err != nil {
+	if err := store.InsertDocumentChunk("page b", "Title B", "https://b.test", vec768(0.9), Metadata{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -124,12 +124,12 @@ func TestKeywordSearchFindsByExactTerm(t *testing.T) {
 	// A chunk whose distinctive keyword ("Kubernetes") a semantic search might rank low.
 	if err := store.InsertDocumentChunk(
 		"Kubernetes handles container orchestration across a cluster of machines.",
-		"/tmp/k8s.md", "", vec768(0.5)); err != nil {
+		"/tmp/k8s.md", "", vec768(0.5), Metadata{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.InsertDocumentChunk(
 		"The weather this afternoon is sunny and pleasantly warm outside.",
-		"/tmp/weather.md", "", vec768(0.2)); err != nil {
+		"/tmp/weather.md", "", vec768(0.2), Metadata{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,7 +149,7 @@ func TestKeywordSearchFindsByExactTerm(t *testing.T) {
 func TestDeleteBySourceUpdatesFTS(t *testing.T) {
 	store := testStore(t)
 	path := "/tmp/doc.md"
-	if err := store.InsertDocumentChunk("uniquetokenalpha appears here in the text", path, "", vec768(0.4)); err != nil {
+	if err := store.InsertDocumentChunk("uniquetokenalpha appears here in the text", path, "", vec768(0.4), Metadata{}); err != nil {
 		t.Fatal(err)
 	}
 	if hits, _ := store.KeywordSearch(`"uniquetokenalpha"`, 10); len(hits) != 1 {
