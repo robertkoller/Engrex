@@ -6,6 +6,7 @@ class StatusBarController {
     private let statusMenu = NSMenu()
     private var queryWindow: QueryWindow?
     private var pollingTimer: Timer?
+    private var deepModelItem: NSMenuItem?
     private let socketClient = SocketClient()
 
     init() {
@@ -13,6 +14,18 @@ class StatusBarController {
         setupButton()
         setupMenu()
         startPolling()
+        loadModelNames()
+    }
+
+    // Asks the daemon which models it offers so the toggle can name the deep one. The
+    // menu is already usable before this returns — the toggle just reads "Deep thinking"
+    // until the daemon answers, and an unnamed model is sent as empty, which the daemon
+    // treats as its default.
+    private func loadModelNames() {
+        ModelSetting.shared.refresh(using: socketClient)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.refreshDeepModelLabel()
+        }
     }
 
     private func setupButton() {
@@ -52,6 +65,22 @@ class StatusBarController {
 
         statusMenu.addItem(.separator())
 
+        // Checked = route queries to the slower, more capable model. Kept as a single
+        // toggle rather than a model picker because the choice users actually make is
+        // "answer fast" vs "think harder", not which weights to load.
+        deepModelItem = NSMenuItem(title: ModelSetting.shared.deepModelLabel,
+                                   action: #selector(toggleDeepModel(_:)),
+                                   keyEquivalent: "d")
+        deepModelItem?.target = self
+        deepModelItem?.state = ModelSetting.shared.useDeepModel ? .on : .off
+        deepModelItem?.toolTip = "Slower, but better at questions about which document "
+            + "something came from. Off uses the faster default model."
+        if let deepModelItem {
+            statusMenu.addItem(deepModelItem)
+        }
+
+        statusMenu.addItem(.separator())
+
         let themeParent = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         themeParent.submenu = makeThemeMenu()
         statusMenu.addItem(themeParent)
@@ -77,6 +106,17 @@ class StatusBarController {
             menu.addItem(item)
         }
         return menu
+    }
+
+    @objc private func toggleDeepModel(_ sender: NSMenuItem) {
+        ModelSetting.shared.useDeepModel.toggle()
+        sender.state = ModelSetting.shared.useDeepModel ? .on : .off
+    }
+
+    // Called once the daemon has reported its model names, so the menu item can show
+    // which model "deep thinking" actually means.
+    func refreshDeepModelLabel() {
+        deepModelItem?.title = ModelSetting.shared.deepModelLabel
     }
 
     @objc private func selectTheme(_ sender: NSMenuItem) {
@@ -125,8 +165,14 @@ class StatusBarController {
     }
 
     @objc func openQueryWindow() {
-        // Recreate fresh each time so the panel always opens compact and empty.
-        queryWindow?.close()
+        // Reuse the existing panel rather than rebuilding it. The window owns the
+        // SwiftUI view whose @State holds the question, answer, and sources, so
+        // recreating it silently threw all of that away — reopening after glancing at
+        // something else lost the results you were coming back to.
+        if let window = queryWindow {
+            window.showAndFocus()
+            return
+        }
         let window = QueryWindow()
         queryWindow = window
         window.showAndFocus()

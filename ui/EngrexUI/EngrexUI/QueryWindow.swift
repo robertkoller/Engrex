@@ -2,10 +2,21 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+extension Notification.Name {
+    // Posted each time the panel is shown. The SwiftUI view can't use .onAppear for
+    // this any more: the window is now reused, so onAppear fires once ever and the
+    // search field would never regain focus on a reopen.
+    static let engrexQueryWindowDidShow = Notification.Name("engrex.queryWindowDidShow")
+}
+
 class QueryWindow: NSPanel {
 
     private let windowWidth: CGFloat = 660
     private let compactHeight: CGFloat = 92
+
+    // Whether the panel has ever been placed on screen. Guards the one-time positioning
+    // so reopening never moves or resizes a window that already holds results.
+    private var hasBeenShown = false
 
     init() {
         super.init(
@@ -130,8 +141,14 @@ class QueryWindow: NSPanel {
     }
 
     func showAndFocus() {
-        // Reset to compact size and position in the upper third, Spotlight-style.
-        positionCompact()
+        // Only place the panel on its first appearance. After that, keep whatever
+        // frame it had — that preserves both the expanded height when results are
+        // showing and any position the user dragged it to. Re-running positionCompact
+        // here would squash a window full of results back down to the bare search bar.
+        if !hasBeenShown {
+            positionCompact()
+            hasBeenShown = true
+        }
 
         alphaValue = 0
         makeKeyAndOrderFront(nil)
@@ -151,6 +168,15 @@ class QueryWindow: NSPanel {
             context.duration = 0.18
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1
+        }
+
+        // Let the view refocus its field, then select what's already there so typing
+        // starts a new question while the previous answer stays on screen until you
+        // actually submit. Same behaviour as reopening Spotlight with a stale query.
+        NotificationCenter.default.post(name: .engrexQueryWindowDidShow, object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, let editor = self.firstResponder as? NSTextView else { return }
+            editor.selectAll(nil)
         }
     }
 

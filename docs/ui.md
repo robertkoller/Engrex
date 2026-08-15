@@ -17,6 +17,7 @@ CLI uses.
 | `QueryWindow.swift` | The floating panel (`NSPanel`) — sizing, positioning, entrance animation |
 | `QueryView.swift` | The SwiftUI content — search bar, streaming answer, sources panel, upload zone, chips |
 | `VisualEffectView.swift` | Bridges `NSVisualEffectView` for the glass background |
+| `ModelSetting.swift` | Which generation model queries use; persists the Deep thinking toggle and fetches model names from the daemon |
 | `Theme.swift` | The color presets |
 | `ToastPresenter.swift` | The floating "Saved to Engrex" HUD |
 | `FileIngestor.swift` | Sends dropped/picked files to the daemon's `addfile` command |
@@ -56,9 +57,58 @@ These are documented in the code comments too, but worth knowing:
   fought with drag-and-drop. The window now stays open while you go to Finder to grab
   a file.
 
+## The Deep thinking toggle
+
+A checkable menu item (⌘D) routing queries to a slower, more capable model. It sends
+`model` on the `query` command, so switching takes effect on the next question with no
+daemon restart.
+
+A single toggle rather than a model picker: the choice people actually make is "answer
+fast" versus "think harder", not which weights to load. The names come from the
+daemon's `models` command (`ModelSetting.refresh`), so the app hardcodes nothing — and
+if that fetch fails, it sends an empty model and the daemon uses its default.
+
+The setting persists in `UserDefaults` under `engrex.useDeepModel`.
+
+## Window reuse
+
+The query panel is created once and reused. `openQueryWindow` previously destroyed and
+rebuilt it on every hotkey press, which threw away the SwiftUI `@State` holding the
+question, answer, and sources — so glancing at something else and reopening lost the
+results you were returning to.
+
+Two consequences of reusing it:
+
+- `showAndFocus` positions the panel only on its **first** appearance. Re-running
+  `positionCompact` would squash a window full of results back to the bare search bar,
+  and it would also undo any position you dragged it to.
+- `.onAppear` now fires only once ever, so the search field would never regain focus.
+  The window posts `engrexQueryWindowDidShow` on every show and `QueryView` listens for
+  it. Existing text is selected on reopen, so typing starts a new question while the
+  previous answer stays until you submit.
+
 ## Building the app
 
-Open `ui/EngrexUI/EngrexUI.xcodeproj` in Xcode and Run. The project uses Xcode's
+Terminal, no Xcode GUI needed (Xcode must still be installed — `xcodebuild` ships with
+it):
+
+```bash
+make app          # Release build → bin/app/Build/Products/Release/EngrexUI.app
+make app-debug    # faster, skips optimization
+make app-install  # quits the running app, replaces /Applications/EngrexUI.app
+make launch       # build + install + run in the FOREGROUND (Ctrl-C quits)
+make app-run      # same but detached
+make app-clean
+```
+
+`launch` executes the binary inside the bundle rather than `open`-ing the `.app` —
+`open` hands off to LaunchServices and returns, leaving the app detached with no way to
+stop it from that terminal. It runs the `/Applications` copy because macOS ties
+accessibility and input-monitoring permissions to a bundle's **path**; running the
+build-directory copy would re-prompt for them and leave the granted ones pointing at an
+app you aren't using.
+
+Or open `ui/EngrexUI/EngrexUI.xcodeproj` in Xcode and Run. The project uses Xcode's
 file-system-synchronized groups, so new `.swift` files in
 `ui/EngrexUI/EngrexUI/` are picked up automatically (bring Xcode to the foreground or
 reopen the project if a freshly added file isn't found). The app must be **de-

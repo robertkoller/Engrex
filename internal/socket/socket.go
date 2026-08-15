@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/robertkoller/engrex/internal/config"
 	"github.com/robertkoller/engrex/internal/ingest"
 	"github.com/robertkoller/engrex/internal/protocol"
 	"github.com/robertkoller/engrex/internal/rag"
@@ -76,6 +77,19 @@ func (socket *Socket) handleConnection(conn net.Conn) {
 	switch command.Type {
 	case protocol.CommandSearch, protocol.CommandDocument, protocol.CommandGraph:
 		socket.handleReadOnly(conn, command)
+	case protocol.CommandModels:
+		payload := protocol.ModelsPayload{
+			Default: socket.rag.GenerateModel(),
+			Deep:    config.DeepModelName(),
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			log.Printf("failed encoding models payload: %v", err)
+			return
+		}
+		if err := json.NewEncoder(conn).Encode(Response{Data: data}); err != nil {
+			log.Printf("failed encoding models response: %v", err)
+		}
 	case "add":
 		if err := socket.rag.Add(command.Text, command.Source, ""); err != nil {
 			if err := json.NewEncoder(conn).Encode(Response{Error: err.Error()}); err != nil {
@@ -89,7 +103,10 @@ func (socket *Socket) handleConnection(conn net.Conn) {
 	case "query":
 		// Tokens are streamed directly to conn via io.Writer — the CLI reads until
 		// the connection closes, so we must not write a JSON response after.
-		if err := socket.rag.Query(conn, command.Text, rag.DefaultSearchDistance, rag.DefaultSearchResults); err != nil {
+		// WithModel returns a copy, so a per-query model choice can't leak into other
+		// connections sharing this daemon.
+		pipeline := socket.rag.WithModel(command.Model)
+		if err := pipeline.Query(conn, command.Text, rag.DefaultSearchDistance, rag.DefaultSearchResults); err != nil {
 			fmt.Fprintf(conn, "\n[Error: %v]\n", err)
 		}
 	case "delete":

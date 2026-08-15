@@ -20,10 +20,21 @@ The `Makefile` sets the CGo flags (`-tags libsqlite3` plus Homebrew include/lib
 paths). **Bare `go build` / `go test` will fail with linker errors.**
 
 ```bash
-make build     # → bin/engrex
+make compile   # → bin/engrex only, no sudo
+make build     # compile + install to /usr/local/bin (alias for `install`)
 make install   # rm + cp bin/engrex to /usr/local/bin/engrex
 make test      # go test with the right tags
 ```
+
+`build` installs rather than only compiling, because **the daemon executes
+`/usr/local/bin/engrex`**. Compiling alone leaves it serving whatever was installed
+last time, which presents as "my changes did nothing" — an easy hour to lose.
+
+`compile` exists for targets that run `./bin/engrex` directly (`eval`, `eval-save`) so
+they don't trigger a sudo prompt for no reason.
+
+⚠️ Installing is still not enough on its own: a running process keeps executing the
+binary it started with. **Restart the daemon after every install.**
 
 ## The `make install` design
 
@@ -208,6 +219,28 @@ docs/                  you are here
 | `debug` / `debug-edges` / `debug-prompt` | Raw distances, edge distribution, assembled prompt |
 | `reindex-edges` | Rebuild graph edges at a given threshold |
 | `daemon` / `mcp` | Run the daemon; manage the MCP interface |
+
+### Make targets
+
+| Target | What it does |
+|---|---|
+| `compile` | Build to `bin/engrex` only, no sudo |
+| `build` / `install` | Compile **and** install to `/usr/local/bin` — what the daemon runs |
+| `test` / `eval` / `eval-save` | Tests; retrieval scoring against the golden set |
+| `app` / `app-debug` | Build the Swift menu-bar app via `xcodebuild` |
+| `app-install` / `launch` / `app-run` | Deploy to `/Applications`; run foreground / detached |
+| `daemon-start` / `daemon-stop` / `daemon-logs` | launchd control |
+
+### Configuration (`~/.engrex/config.json`)
+
+| Key | Default | Purpose |
+|---|---|---|
+| `mcp_enabled` | `false` | Gates the read-only MCP commands |
+| `generate_model` | `llama3.2` | Model used for answers and all optional stages |
+| `deep_model` | `qwen3:4b` | The "think harder" alternative the app can switch to per query |
+
+Model resolution order: `--model` flag → `ENGREX_GENERATE_MODEL` →
+`generate_model` → default. `ENGREX_DEEP_MODEL` overrides `deep_model` the same way.
 
 `ask` runs in-process rather than through the daemon deliberately: the optional stages
 are per-invocation experiments, and threading a matrix of flags through the daemon

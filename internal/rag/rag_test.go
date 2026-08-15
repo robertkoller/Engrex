@@ -197,3 +197,24 @@ func TestReingestSkipsUnchangedAndReplacesChanged(t *testing.T) {
 		t.Fatal("expected V2 chunks after replace")
 	}
 }
+
+// A query whose only matching words are stopwords must not pull in sources. BM25 has
+// no relevance floor the way vector search has maxDistance, so before stopwords were
+// filtered, "what is an orangutan" matched every chunk containing "is" and cited them
+// as sources for a question the corpus could not answer.
+func TestToFTSQueryDropsStopwords(t *testing.T) {
+	got := toFTSQuery("what is an orangutang")
+	if got != `"orangutang"` {
+		t.Errorf("toFTSQuery = %q, want only the content word", got)
+	}
+
+	// An all-stopword question yields no keyword search at all.
+	if got := toFTSQuery("what is it"); got != "" {
+		t.Errorf("all-stopword query = %q, want empty", got)
+	}
+
+	// Content words survive, and punctuation doesn't hide a stopword.
+	if got := toFTSQuery("How does ResNet work?"); got != `"ResNet" OR "work?"` {
+		t.Errorf("content words lost: %q", got)
+	}
+}

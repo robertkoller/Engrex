@@ -19,17 +19,33 @@ Listens on `~/.engrex/daemon.sock`. This is how the **CLI**, the **Swift app**, 
 (`internal/protocol`):
 
 ```json
-{ "type": "add | query | delete | addfile | search | document | graph",
-  "text": "...", "source": "...", "limit": 0, "depth": 0 }
+{ "type": "add | query | delete | addfile | search | document | graph | models",
+  "text": "...", "source": "...", "limit": 0, "depth": 0, "model": "" }
 ```
 
 Write and query commands:
 
 - **add** — `rag.Add(text, source, "")`, replies `{}` or `{"error":"…"}`.
 - **query** — streams the answer back (sources JSON line, then tokens). See
-  [rag-pipeline.md](rag-pipeline.md#query-wire-protocol).
+  [rag-pipeline.md](rag-pipeline.md#query-wire-protocol). Accepts an optional `model`
+  (see below).
 - **delete** — `store.Delete(spec)` where `spec` is like `1,5,7-9`.
 - **addfile** — copies + ingests a file with origin (see [ingestion.md](ingestion.md)).
+- **models** — reports the model names this daemon offers, as
+  `{"default": "...", "deep": "..."}`. Clients use it so model names live in one place
+  instead of being hardcoded into every UI.
+
+### Per-query model selection
+
+`query` takes an optional `model`. Empty means the daemon's configured default; a name
+routes that one question elsewhere. This is how the app's **Deep thinking** toggle
+works — a slower, more capable model for the questions that need it, with no daemon
+restart and no saved-config change.
+
+The handler routes through `rag.WithModel`, which returns a **copy** of the pipeline
+rather than mutating it. The daemon shares one `RAG` across concurrent connections, so
+mutating in place would let one request's model choice leak into another's — or race
+outright.
 
 Read-only commands (`internal/socket/readonly.go`), added for MCP:
 

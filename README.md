@@ -338,10 +338,15 @@ Full details in [docs/mcp.md](docs/mcp.md).
 Always use `make` instead of bare `go` commands. The Makefile sets the correct CGo flags to link against Homebrew's SQLite, which is required for sqlite-vec to work on macOS.
 
 ```bash
-make install   # build the binary to bin/engrex
+make compile   # build the binary to bin/engrex (no sudo)
+make build     # compile + install to /usr/local/bin — what the daemon runs
 make test      # run all tests
 make eval      # score retrieval against the golden set
+make launch    # build, install, and run the menu-bar app in the foreground
 ```
+
+⚠️ `make build` installs because the daemon executes `/usr/local/bin/engrex`. After
+installing, **restart the daemon** — a running process keeps its old binary.
 
 Running `go build` or `go test` directly without the Makefile flags will fail with linker errors on macOS.
 

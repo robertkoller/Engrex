@@ -22,6 +22,31 @@ type Config struct {
 	// less reliably than an 8B — and comparing two models should not require editing
 	// a constant and rebuilding.
 	GenerateModel string `json:"generate_model,omitempty"`
+
+	// DeepModel is the slower, more capable model a client can switch to per query.
+	// Empty means DefaultDeepModel.
+	DeepModel string `json:"deep_model,omitempty"`
+}
+
+// DefaultDeepModel is the "think harder" alternative offered alongside the default.
+//
+// The pairing is deliberate: llama3.2 answers in ~11s but invents sources when asked
+// which document something came from, while qwen3:4b answers correctly and takes
+// ~29s. Neither is strictly better, so the choice belongs to the person asking rather
+// than to a config file.
+const DefaultDeepModel = "qwen3:4b"
+
+// DeepModelName resolves the deep model the same way GenerateModelName resolves the
+// default one.
+func DeepModelName() string {
+	if override := strings.TrimSpace(os.Getenv("ENGREX_DEEP_MODEL")); override != "" {
+		return override
+	}
+	configuration, err := Load()
+	if err == nil && strings.TrimSpace(configuration.DeepModel) != "" {
+		return strings.TrimSpace(configuration.DeepModel)
+	}
+	return DefaultDeepModel
 }
 
 // GenerateModelName resolves which model to generate with, in precedence order:

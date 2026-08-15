@@ -84,8 +84,9 @@ is no second implementation to drift.
      `maxDistance` (cosine).
    - **Keyword** (`store.KeywordSearch`) — BM25 over the `fts_chunks` FTS5 index,
      catching exact terms, proper nouns, and IDs that embeddings smear over.
-     `toFTSQuery` first turns the raw question into a safe MATCH expression (each word
-     quoted and OR'd, so punctuation and reserved words can't break the query).
+     `toFTSQuery` turns the raw question into a safe MATCH expression: each word quoted
+     and OR'd so punctuation and reserved words can't break the query, and **stopwords
+     dropped** (see below). If nothing survives, keyword search is skipped entirely.
    - **Fuse** (`fuseRRF`) — each list contributes `1/(60 + rank)` to a chunk's score, so
      results ranked highly by either method — and especially both — rise to the top.
      Ranks are fused rather than raw scores, because cosine distance and BM25 aren't
@@ -96,6 +97,28 @@ is no second implementation to drift.
 
 Each returned chunk carries its RRF `Score` alongside its vector `Distance`; `Distance`
 is `0` for chunks only the keyword search found.
+
+### Why keyword search drops stopwords
+
+The two retrieval halves are not symmetric: vector search has `maxDistance` as a
+quality floor, and **BM25 has no equivalent**. Terms are OR'd, so a single matching
+word is enough to pull a chunk into the results.
+
+That combination produced a real bug. Asking *"what is an orangutang"* of a corpus
+containing only a ResNet paper yielded:
+
+```
+"what" OR "is" OR "an" OR "orangutang"
+```
+
+`what`, `is`, and `an` matched nearly every chunk, and those chunks were then cited as
+sources for a question the notes could not answer at all. Vector search had correctly
+rejected everything — its nearest hit was 0.52, outside the 0.451 threshold.
+
+`toFTSQuery` now filters closed-class words — articles, pronouns, prepositions,
+auxiliaries, question words — keeping anything that could plausibly be the subject of a
+search. A question made entirely of stopwords produces no keyword query at all, and
+retrieval falls back to the vector half alone.
 
 ### How many passages reach the prompt
 
@@ -208,6 +231,35 @@ high silently truncates), plus 1024 reserved for the answer.
 Use `engrex debug-prompt "<question>"` to see exactly what the model receives. It
 separates "wrong context" from "right context, bad answer" — two failures that look
 identical from the answer alone.
+
+## Answer length (`num_predict`)
+
+`maxAnswerTokens` is **400**. Generation dominates query latency and length dominates
+generation, so this is the largest single lever on how long a query takes.
+
+Verbosity varies far more by model than by question. On the same prompt, `llama3.2`
+produced 52 tokens while `qwen3:4b` produced 977 — the latter taking 53s uncapped
+versus 14s capped at 250. The cap is what keeps worst-case latency bounded when the
+generation model changes underneath.
+
+Prompt rule 4 also asks for a direct, concise answer. An earlier version asked the
+model to be "specific and thorough… rather than summarizing it away", which was
+directly buying those 977-token answers.
+
+## Prompt caching
+
+llama.cpp caches the KV state for a prompt **prefix** and reuses it verbatim, and
+Ollama enables this by default. Measured on the same prompt twice:
+
+| | Total | Prompt eval |
+|---|---|---|
+| Cold | 10.4s | 8.2s |
+| Cached | **1.7s** | **0.0s** |
+
+The prompt is deliberately ordered to exploit this — stable rules first, then the
+manifest, then passages, then the question last. Two questions that retrieve the same
+passages share everything up to `QUESTION:`, so the second is nearly free. On a narrow
+corpus where most questions pull the same chunks, that covers a lot of queries.
 
 ## Models
 

@@ -54,8 +54,12 @@ class SocketClient {
     // The daemon sends the source file list as a JSON first line, then streams the
     // answer text. onSources fires once with the parsed sources; onToken fires for
     // each subsequent chunk of answer text.
+    // model is sent per query and may be empty, in which case the daemon uses its
+    // configured default. Sending it per query rather than configuring the daemon is
+    // what lets the toolbar toggle take effect on the next question with no restart.
     func sendQuery(
         text: String,
+        model: String = "",
         onSources: @escaping ([String]) -> Void,
         onToken: @escaping (String) -> Void,
         onComplete: @escaping (Error?) -> Void
@@ -67,7 +71,11 @@ class SocketClient {
             }
             defer { close(fileDescriptor) }
 
-            guard let payload = self.encode(["type": "query", "text": text]) else {
+            var command = ["type": "query", "text": text]
+            if !model.isEmpty {
+                command["model"] = model
+            }
+            guard let payload = self.encode(command) else {
                 DispatchQueue.main.async { onComplete(SocketError.encodingFailed) }
                 return
             }
@@ -117,6 +125,33 @@ class SocketClient {
             return []
         }
         return sources
+    }
+
+    // The generation models the daemon offers, so the app never hardcodes model names.
+    struct Models {
+        let defaultModel: String
+        let deep: String
+    }
+
+    // Asks the daemon which models are available. Calls back with nil on any failure —
+    // the caller's fallback is to send no model at all, which the daemon reads as "use
+    // your default", so a failure here degrades to current behaviour rather than an error.
+    func fetchModels(completion: @escaping (Models?) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            let result = self.runRequestReturningData(command: ["type": "models"])
+            guard case .success(let data) = result,
+                  let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let payload = envelope["data"] as? [String: Any],
+                  let defaultModel = payload["default"] as? String,
+                  let deep = payload["deep"] as? String
+            else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            DispatchQueue.main.async {
+                completion(Models(defaultModel: defaultModel, deep: deep))
+            }
+        }
     }
 
     // Sends a command and reads the full response body until the daemon closes the connection.

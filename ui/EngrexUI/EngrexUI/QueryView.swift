@@ -67,12 +67,22 @@ struct QueryView: View {
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isUploadMode)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isGraphMode)
         .onAppear {
-            // Delay so the window has become key before requesting focus — otherwise
-            // the focus request is dropped and the "color in" animation never fires.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    isFieldFocused = true
-                }
+            focusFieldShortly()
+        }
+        // The window is reused between hotkey presses so previous results survive,
+        // which means onAppear fires only once. This is what refocuses the field on
+        // every reopen.
+        .onReceive(NotificationCenter.default.publisher(for: .engrexQueryWindowDidShow)) { _ in
+            focusFieldShortly()
+        }
+    }
+
+    // Delay so the window has become key before requesting focus — otherwise the focus
+    // request is dropped and the "color in" animation never fires.
+    private func focusFieldShortly() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            withAnimation(.easeInOut(duration: 0.35)) {
+                isFieldFocused = true
             }
         }
     }
@@ -509,6 +519,7 @@ struct QueryView: View {
 
         socketClient.sendQuery(
             text: fullQuery,
+            model: ModelSetting.shared.modelForQuery,
             onSources: { sources in
                 withAnimation { self.sources = sources }
                 if !sources.isEmpty {

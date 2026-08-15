@@ -10,7 +10,18 @@ const (
 	CommandSearch   = "search"
 	CommandDocument = "document"
 	CommandGraph    = "graph"
+	CommandModels   = "models"
 )
+
+// ModelsPayload tells a client which models it can offer, so the names live in one
+// place rather than being hardcoded into every UI.
+type ModelsPayload struct {
+	// Default is the fast model used when a query names none.
+	Default string `json:"default"`
+
+	// Deep is the slower, more capable alternative.
+	Deep string `json:"deep"`
+}
 
 const (
 	CodeInvalidInput = "invalid_input"
@@ -36,6 +47,11 @@ type Command struct {
 	Limit int `json:"limit,omitempty"`
 
 	Depth int `json:"depth,omitempty"`
+
+	// Model overrides the generation model for this query only. Empty means the
+	// daemon's configured default. Lets a client offer a per-question choice between a
+	// fast model and a more capable one without restarting the daemon.
+	Model string `json:"model,omitempty"`
 }
 
 type Response struct {

@@ -57,6 +57,18 @@ const rerankCandidates = 40
 // paper and the de-facto default; larger flattens the contribution of top ranks.
 const rrfK = 60
 
+// maxAnswerTokens caps how long an answer can run.
+//
+// Generation dominates query latency, and length dominates generation — so this is the
+// single largest lever on how long a query takes. Measured on qwen3:4b answering "what
+// is a residual connection": uncapped it produced 977 tokens in 53s, capped at 250 it
+// produced a complete answer in 14s. Nearly 4x, for output nobody was reading.
+//
+// Verbosity varies enormously by model rather than by question — llama3.2 answered the
+// same prompt in 52 tokens — so the cap is what keeps worst-case latency bounded when
+// the generation model changes underneath.
+const maxAnswerTokens = 400
+
 // RAG wires the embedder, store, and LLM together into the add/query pipeline.
 type RAG struct {
 	embedder *embedder.Embedder
@@ -97,13 +109,20 @@ func New(s *store.Store) (*RAG, error) {
 // GenerateModel reports which model this instance generates with.
 func (r *RAG) GenerateModel() string { return r.generateModel }
 
-// WithModel overrides the generation model for this instance, so a single query or
-// eval run can be pointed at a different model without changing saved configuration.
+// WithModel returns a copy of the pipeline that generates with a different model, so a
+// single query can be pointed elsewhere without changing saved configuration.
+//
+// A copy rather than a mutation because the daemon shares one RAG across concurrent
+// connections: mutating it in place would let one request's model selection leak into
+// another's, or race outright. An empty model returns the receiver unchanged.
 func (r *RAG) WithModel(model string) *RAG {
-	if strings.TrimSpace(model) != "" {
-		r.generateModel = strings.TrimSpace(model)
+	model = strings.TrimSpace(model)
+	if model == "" || model == r.generateModel {
+		return r
 	}
-	return r
+	copied := *r
+	copied.generateModel = model
+	return &copied
 }
 
 // WithReranker enables reranking. Separate from New so the plain pipeline stays the
@@ -531,10 +550,13 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"model":   r.generateModel,
-		"prompt":  prompt,
-		"stream":  true,
-		"options": map[string]any{"num_ctx": contextWindowFor(prompt)},
+		"model":  r.generateModel,
+		"prompt": prompt,
+		"stream": true,
+		"options": map[string]any{
+			"num_ctx":     contextWindowFor(prompt),
+			"num_predict": maxAnswerTokens,
+		},
 	})
 	if err != nil {
 		return err
@@ -642,10 +664,47 @@ func contextWindowFor(prompt string) int {
 func toFTSQuery(raw string) string {
 	var terms []string
 	for _, field := range strings.Fields(raw) {
+		if isStopword(field) {
+			continue
+		}
 		field = strings.ReplaceAll(field, `"`, `""`) // escape embedded quotes
 		terms = append(terms, `"`+field+`"`)
 	}
 	return strings.Join(terms, " OR ")
+}
+
+// stopwords are dropped before keyword search.
+//
+// The terms are OR'd, and BM25 has no relevance threshold the way vector search has
+// maxDistance — so a single common word matching is enough to pull a chunk into the
+// results. "what is an orangutan" over a corpus with no orangutan in it still matched
+// every chunk containing "is", and those chunks then appeared as cited sources for a
+// question the notes could not answer at all.
+//
+// Only closed-class words are listed: articles, pronouns, prepositions, auxiliaries,
+// and question words. Anything that could plausibly be the subject of a search stays.
+var stopwords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true, "but": true,
+	"if": true, "then": true, "than": true, "that": true, "this": true, "these": true,
+	"those": true, "is": true, "are": true, "was": true, "were": true, "be": true,
+	"been": true, "being": true, "am": true, "do": true, "does": true, "did": true,
+	"have": true, "has": true, "had": true, "can": true, "could": true, "will": true,
+	"would": true, "should": true, "may": true, "might": true, "must": true,
+	"i": true, "me": true, "my": true, "you": true, "your": true, "it": true,
+	"its": true, "we": true, "our": true, "they": true, "them": true, "their": true,
+	"he": true, "she": true, "his": true, "her": true,
+	"of": true, "in": true, "on": true, "at": true, "to": true, "for": true,
+	"with": true, "from": true, "by": true, "about": true, "as": true, "into": true,
+	"what": true, "when": true, "where": true, "who": true, "whom": true, "which": true,
+	"why": true, "how": true, "there": true, "here": true,
+	"me?": true, "please": true, "tell": true, "show": true, "give": true,
+}
+
+// isStopword reports whether a raw query word carries no retrieval signal. Punctuation
+// is trimmed first so "what?" and "the," are recognised.
+func isStopword(field string) bool {
+	cleaned := strings.ToLower(strings.Trim(field, `.,!?;:'"()[]{}`))
+	return cleaned == "" || stopwords[cleaned]
 }
 
 // fuseRRF merges the vector and keyword result lists with Reciprocal Rank Fusion: each
@@ -820,7 +879,8 @@ func buildPrompt(question string, chunks []store.Chunk, options queryOptions) st
 	builder.WriteString("1. Answer using ONLY the CONTEXT below. Do not use anything you know from training.\n")
 	builder.WriteString("2. Never invent titles, authors, dates, numbers, or sources. If it is not in the CONTEXT, it does not exist.\n")
 	builder.WriteString("3. If the CONTEXT does not answer the question, say exactly what the saved material DOES cover, then say the rest is not in their notes. Do not fill the gap from memory.\n")
-	builder.WriteString("4. Be specific and thorough — use all relevant detail from the CONTEXT rather than summarizing it away.\n")
+	builder.WriteString("4. Answer directly and concisely. Lead with the answer itself. Include the specific details that answer the question — numbers, names, settings — and leave out everything else.\n")
+	builder.WriteString("5. Do not restate the question, summarize the context, or add a closing offer to help.\n")
 
 	if options.includeDate || options.includeSource {
 		var parts []string
@@ -830,7 +890,7 @@ func buildPrompt(question string, chunks []store.Chunk, options queryOptions) st
 		if options.includeDate {
 			parts = append(parts, "the date it was saved")
 		}
-		fmt.Fprintf(&builder, "5. When you use a passage, cite %s once in parentheses where you use it. Cite each document only once, not per sentence.\n", strings.Join(parts, " and "))
+		fmt.Fprintf(&builder, "6. When you use a passage, cite %s once in parentheses where you use it. Cite each document only once, not per sentence.\n", strings.Join(parts, " and "))
 	}
 
 	// A manifest of the documents the passages came from, stated once and up front.

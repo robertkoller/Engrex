@@ -117,7 +117,7 @@ chunks to the LLM, MCP hands them to the calling model. See [mcp.md](mcp.md).
 |---|---|
 | `~/.engrex/engrex.db` | The SQLite database (chunks + vectors) |
 | `~/.engrex/daemon.sock` | The Unix socket the CLI/app/MCP bridge connect to |
-| `~/.engrex/config.json` | User settings — currently just the MCP toggle (optional; defaults apply when absent) |
+| `~/.engrex/config.json` | User settings — `mcp_enabled`, `generate_model`, `deep_model` (optional; defaults apply when absent) |
 | `~/Engrex/` | The watched "inbox" — drop files here to ingest them |
 | `~/Engrex/RawText/` | `.txt` stubs of CLI/hotkey/web captures, for browsing (not watched) |
 | `~/Library/LaunchAgents/com.robertkoller.engrex.plist` | Optional launchd agent for auto-start |
