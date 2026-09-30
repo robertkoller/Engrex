@@ -1,16 +1,20 @@
 # The Daemon
 
 `engrex daemon` is the long-running process that owns everything. It's assembled in
-`internal/daemon/daemon.go` and runs three concurrent listeners, each in its own
+`internal/daemon/daemon.go` and runs four concurrent listeners, each in its own
 goroutine, shutting them all down cleanly on `SIGTERM`/`SIGINT`.
 
 ```
-daemon.Start()   → opens DB, builds store + rag, creates the three listeners
-daemon.Run()     → go watcher.Start(); go socket.Start(); go server.Start(); wait for signal
-                 → on signal: watcher.Stop(); socket.Stop(); server.Stop(); db.Close()
+daemon.Start()   → opens DB, builds store + rag, creates the four listeners
+daemon.Run()     → go watcher.Start(); go socket.Start(); go server.Start(); go graph.Start()
+                 → wait for signal
+                 → on signal: watcher.Stop(); socket.Stop(); server.Stop(); graph.Stop(); db.Close()
 ```
 
-## The three listeners
+Every `Start()` is launched with a bare `go`, so its error is discarded — a failed port
+bind is silent, and the symptom is a listener that simply never answers.
+
+## The four listeners
 
 ### 1. Unix socket — `internal/socket`
 
@@ -85,7 +89,18 @@ POST /capture   { "text": "...", "url": "...", "title": "..." }
 It sets CORS headers (the extension is a different origin), handles the `OPTIONS`
 preflight, and on success calls `rag.Add(text, title, url)`.
 
-### 3. File watcher — `internal/watcher`
+### 3. Graph server — `internal/graphserver`
+
+Binds `127.0.0.1:7778`. Serves `/graph` and `/query` as JSON for the document-web view,
+and the static assets behind it from the `web/` directory.
+
+**Known bug:** those assets are served with `http.FileServer(http.Dir("web"))` — a path
+relative to the daemon's working directory. Run under launchd, the working directory is
+`/`, so `/` returns 404 while `/graph` still answers. It works only when the daemon is
+started from the repository root. Embedding the assets in the binary would remove the
+dependency on where the process was launched.
+
+### 4. File watcher — `internal/watcher`
 
 Watches `~/Engrex/` for saves and ingests them. Details in
 [ingestion.md](ingestion.md#3-file-watcher--engrex).

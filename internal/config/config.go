@@ -16,6 +16,13 @@ const DefaultGenerateModel = "llama3.2"
 type Config struct {
 	MCPEnabled bool `json:"mcp_enabled"`
 
+	// OllamaURL is where generation and embedding calls go. Empty means
+	// DefaultOllamaURL. Configurable so the semantic cache in cache/ can be put in front
+	// of Ollama by changing this one value — see docs/caching.md. Pointing it at a proxy
+	// that is not running fails loudly at startup, which is the intended trade: whether
+	// the cache is in the path should never be a guess.
+	OllamaURL string `json:"ollama_url,omitempty"`
+
 	// GenerateModel is the Ollama model used for generation. Empty means
 	// DefaultGenerateModel. Configurable because model choice is the single biggest
 	// lever on answer quality here — a 3B follows instructions over long context far
@@ -63,6 +70,23 @@ func GenerateModelName() string {
 		return strings.TrimSpace(configuration.GenerateModel)
 	}
 	return DefaultGenerateModel
+}
+
+// DefaultOllamaURL is where Ollama itself listens.
+const DefaultOllamaURL = "http://localhost:11434"
+
+// OllamaURL resolves which server to send generation and embedding calls to, the same
+// way GenerateModelName resolves the model: environment first, then the config file,
+// then the default.
+func OllamaURL() string {
+	if override := strings.TrimSpace(os.Getenv("ENGREX_OLLAMA_URL")); override != "" {
+		return strings.TrimRight(override, "/")
+	}
+	configuration, err := Load()
+	if err == nil && strings.TrimSpace(configuration.OllamaURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(configuration.OllamaURL), "/")
+	}
+	return DefaultOllamaURL
 }
 
 func Path() (string, error) {

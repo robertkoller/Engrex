@@ -27,8 +27,6 @@ import (
 	"github.com/robertkoller/engrex/internal/verify"
 )
 
-const ollamaBaseURL = "http://localhost:11434"
-
 // DefaultSearchDistance is the maximum cosine distance for a vector hit to count.
 // Converted from the previously calibrated L2 0.95 — see the derivation on
 // store.DefaultEdgeThreshold. Not freshly calibrated: that needs a multi-topic corpus.
@@ -91,11 +89,17 @@ type RAG struct {
 	// reranking, rewriting, verifying — uses the same model. Resolving per call would
 	// let an environment change mid-run split a single query across two models.
 	generateModel string
+
+	// ollamaBaseURL is resolved once for the same reason, and is what lets the semantic
+	// cache in cache/ be dropped in front of Ollama without touching any call site: it
+	// speaks the same API, so this points at it instead. See docs/caching.md.
+	ollamaBaseURL string
 }
 
 // New returns a RAG instance. Checks that Ollama is reachable before returning.
 func New(s *store.Store) (*RAG, error) {
-	embed := embedder.New(ollamaBaseURL)
+	baseURL := config.OllamaURL()
+	embed := embedder.New(baseURL)
 	if err := embed.Ping(); err != nil {
 		return nil, err
 	}
@@ -103,6 +107,7 @@ func New(s *store.Store) (*RAG, error) {
 		embedder:      embed,
 		store:         s,
 		generateModel: config.GenerateModelName(),
+		ollamaBaseURL: baseURL,
 	}, nil
 }
 
@@ -141,12 +146,12 @@ func (r *RAG) WithRewriter(rewriter rewrite.Rewriter) *RAG {
 // NewLLMReranker builds the listwise reranker over the same Ollama instance and model
 // the answer path uses.
 func (r *RAG) NewLLMReranker() rerank.Reranker {
-	return rerank.NewLLM(ollamaBaseURL, r.generateModel)
+	return rerank.NewLLM(r.ollamaBaseURL, r.generateModel)
 }
 
 // NewLLMRewriter builds the query rewriter over the same Ollama instance and model.
 func (r *RAG) NewLLMRewriter() rewrite.Rewriter {
-	return rewrite.NewLLM(ollamaBaseURL, r.generateModel)
+	return rewrite.NewLLM(r.ollamaBaseURL, r.generateModel)
 }
 
 // WithVerifier enables post-hoc citation verification.
@@ -157,7 +162,7 @@ func (r *RAG) WithVerifier(verifier verify.Verifier) *RAG {
 
 // NewLLMVerifier builds the entailment verifier over the same Ollama instance and model.
 func (r *RAG) NewLLMVerifier() verify.Verifier {
-	return verify.NewLLM(ollamaBaseURL, r.generateModel)
+	return verify.NewLLM(r.ollamaBaseURL, r.generateModel)
 }
 
 // Add chunks the text, embeds each chunk, and stores them with the given source
@@ -556,35 +561,58 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 		"options": map[string]any{
 			"num_ctx":     contextWindowFor(prompt),
 			"num_predict": maxAnswerTokens,
+
+			// Pinned, matching what reranking, rewriting and verification already send.
+			// Without it Ollama samples at its own default, so asking the same question
+			// twice gives two differently worded answers of two different lengths — and
+			// length is what dominates latency here. That makes a cached run and an
+			// uncached run incomparable, which is unhelpful when the point of cache/ is
+			// to measure exactly that difference.
+			"temperature": 0,
 		},
 	})
 	if err != nil {
 		return err
 	}
-	response, err := http.Post(ollamaBaseURL+"/api/generate", "application/json", bytes.NewReader(body))
+	response, err := http.Post(r.ollamaBaseURL+"/api/generate", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("ollama returned %d: %s", response.StatusCode, strings.TrimSpace(string(raw)))
+	}
 
 	// The answer is streamed to the caller and accumulated at the same time. Streaming
 	// is what makes the wait tolerable, but verification needs the finished text — so
 	// it is collected as it goes rather than buying it back with a second pass.
 	var answer strings.Builder
 	scanner := bufio.NewScanner(response.Body)
+
+	// The default 64KB line limit is less than Ollama's final frame can reach with its
+	// context array, and past it Scan just stops, which would cut the answer off silently
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		var token struct {
 			Response string `json:"response"`
 			Done     bool   `json:"done"`
+			Error    string `json:"error"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &token); err != nil {
 			fmt.Fprint(out, err)
+		}
+		if token.Error != "" {
+			return fmt.Errorf("ollama failed mid-answer: %s", token.Error)
 		}
 		fmt.Fprint(out, token.Response)
 		answer.WriteString(token.Response)
 		if token.Done {
 			break
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("reading the answer stream: %w", err)
 	}
 	fmt.Fprintln(out)
 

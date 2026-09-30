@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engrex Cache</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #ffffff; --ink: #17150f; --muted: #6d6659;
+    --line: #e6e1d7; --accent: #b5581f; --good: #3f6f4a; --dim: #ded8cc;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14130f; --panel: #1c1a16; --ink: #f2efe8; --muted: #a09889;
+      --line: #2c2924; --accent: #e08a4c; --good: #7fb08c; --dim: #35312a;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 64px;
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 6px; }
+  .value { font-size: 27px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .value small { font-size: 14px; font-weight: 400; color: var(--muted); margin-left: 3px; }
+  .accent { color: var(--accent); }
+  .good { color: var(--good); }
+  .wide { grid-column: 1 / -1; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+  tbody tr:last-child td { border-bottom: none; }
+  .bar { height: 6px; border-radius: 3px; background: var(--dim); overflow: hidden; min-width: 90px; }
+  .bar span { display: block; height: 100%; background: var(--accent); }
+  .empty { color: var(--muted); padding: 14px 0; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 26px; }
+  code { background: var(--dim); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Engrex semantic cache</h1></header>
+  <div class="sub" id="uptime">connecting…</div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Hit rate</div><div class="value accent" id="hitrate">—</div></div>
+    <div class="card"><div class="label">Time saved</div><div class="value good" id="saved">—</div></div>
+    <div class="card"><div class="label">Entries</div><div class="value" id="entries">—</div></div>
+    <div class="card"><div class="label">Lookups</div><div class="value" id="lookups">—</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Hit latency p50 / p95</div><div class="value" id="hitlat">—</div></div>
+    <div class="card"><div class="label">Miss latency p50 / p95</div><div class="value" id="misslat">—</div></div>
+    <div class="card"><div class="label">Speedup, in-proxy</div><div class="value accent" id="speedup">—</div></div>
+    <div class="card"><div class="label">Evictions</div><div class="value" id="evictions">—</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card wide">
+      <div class="label">By call class</div>
+      <table><thead><tr><th>Class</th><th>Hits</th><th>Misses</th><th>Hit rate</th><th style="width:38%"></th></tr></thead>
+      <tbody id="classes"><tr><td colspan="5" class="empty">no traffic yet</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Hits by tier</div><table><tbody id="tiers"><tr><td class="empty">none yet</td></tr></tbody></table></div>
+    <div class="card">
+      <div class="label">Near-miss similarity</div>
+      <table><tbody id="nearmiss"><tr><td class="empty">none yet</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <footer>
+    Scrape <code>/metrics</code> for Prometheus. Near-miss scores are what
+    <code>engrex-cache tune</code> replays to pick a threshold.
+  </footer>
+</div>
+
+<script>
+const number = new Intl.NumberFormat();
+
+function duration(seconds) {
+  if (seconds < 1) return (seconds * 1000).toFixed(0) + "<small>ms</small>";
+  if (seconds < 90) return seconds.toFixed(1) + "<small>s</small>";
+  if (seconds < 5400) return (seconds / 60).toFixed(1) + "<small>min</small>";
+  return (seconds / 3600).toFixed(1) + "<small>h</small>";
+}
+
+function micros(value) {
+  if (!value) return "—";
+  if (value < 1000) return value.toFixed(0) + "<small>µs</small>";
+  if (value < 1000000) return (value / 1000).toFixed(1) + "<small>ms</small>";
+  return (value / 1000000).toFixed(2) + "<small>s</small>";
+}
+
+function row(cells) {
+  return "<tr>" + cells.map((cell) => "<td>" + cell + "</td>").join("") + "</tr>";
+}
+
+function render(stats) {
+  const lookups = stats.hits + stats.misses;
+  document.getElementById("uptime").textContent =
+    number.format(lookups) + " lookups over " + duration(stats.uptime_seconds).replace(/<[^>]+>/g, "") +
+    " · " + number.format(stats.bypasses) + " bypassed";
+
+  document.getElementById("hitrate").innerHTML = (stats.hit_rate * 100).toFixed(1) + "<small>%</small>";
+  document.getElementById("saved").innerHTML = duration(stats.time_saved_seconds);
+  document.getElementById("entries").textContent = number.format(stats.entries);
+  document.getElementById("lookups").textContent = number.format(lookups);
+  document.getElementById("evictions").textContent = number.format(stats.evictions);
+
+  const hit = stats.hit_latency_micros, miss = stats.miss_latency_micros;
+  document.getElementById("hitlat").innerHTML = micros(hit.p50) + " / " + micros(hit.p95);
+  document.getElementById("misslat").innerHTML = micros(miss.p50) + " / " + micros(miss.p95);
+  document.getElementById("speedup").innerHTML =
+    hit.p50 > 0 && miss.p50 > 0 ? (miss.p50 / hit.p50).toFixed(0) + "<small>×</small>" : "—";
+
+  const classes = new Set([
+    ...Object.keys(stats.hits_by_class || {}),
+    ...Object.keys(stats.misses_by_class || {}),
+  ]);
+  const classRows = [...classes].sort().map((name) => {
+    const hits = (stats.hits_by_class || {})[name] || 0;
+    const misses = (stats.misses_by_class || {})[name] || 0;
+    const rate = hits + misses > 0 ? hits / (hits + misses) : 0;
+    return row([
+      name, number.format(hits), number.format(misses), (rate * 100).toFixed(1) + "%",
+      '<div class="bar"><span style="width:' + (rate * 100).toFixed(1) + '%"></span></div>',
+    ]);
+  });
+  document.getElementById("classes").innerHTML =
+    classRows.join("") || '<tr><td colspan="5" class="empty">no traffic yet</td></tr>';
+
+  const tiers = Object.entries(stats.hits_by_tier || {}).sort();
+  document.getElementById("tiers").innerHTML =
+    tiers.map(([name, count]) => row([name, number.format(count)])).join("") ||
+    '<tr><td class="empty">none yet</td></tr>';
+
+  const near = stats.near_miss_similarity;
+  document.getElementById("nearmiss").innerHTML = near.count
+    ? [row(["p50", near.p50.toFixed(3)]), row(["p95", near.p95.toFixed(3)]),
+       row(["samples", number.format(near.count)])].join("")
+    : '<tr><td class="empty">none yet</td></tr>';
+}
+
+async function poll() {
+  try {
+    render(await (await fetch("/api/stats")).json());
+  } catch (error) {
+    document.getElementById("uptime").textContent = "cache proxy unreachable";
+  }
+}
+
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

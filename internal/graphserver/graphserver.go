@@ -9,6 +9,7 @@ import (
 
 	"github.com/robertkoller/engrex/internal/rag"
 	"github.com/robertkoller/engrex/internal/store"
+	"github.com/robertkoller/engrex/web"
 )
 
 // GServer serves the graph web UI and its data/query endpoints on localhost:7778.
@@ -28,7 +29,7 @@ func (server *GServer) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/graph", server.handleGraph)
 	mux.HandleFunc("/query", server.handleQuery)
-	mux.Handle("/", http.FileServer(http.Dir("web")))
+	mux.Handle("/", http.FileServer(http.FS(web.FS)))
 
 	serv := &http.Server{
 		Addr:    "127.0.0.1:7778",

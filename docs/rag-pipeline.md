@@ -46,10 +46,15 @@ around this core and are documented separately in
    the retrieved passages, and the question (see [Prompting](#prompting)). If nothing
    relevant was found, `buildNoContextPrompt` asks the model to answer from general
    knowledge and label it `[outside knowledge]:`.
-5. **Stream** — the prompt goes to Ollama's `/api/generate` with `"stream": true` and
-   an explicitly sized `num_ctx` (see [Context sizing](#context-sizing-num_ctx)).
-   Tokens are written to `out` as they arrive, and accumulated so verification can see
-   the finished answer.
+5. **Stream** — the prompt goes to `/api/generate` with `"stream": true`, `temperature`
+   pinned to 0, and an explicitly sized `num_ctx` (see
+   [Context sizing](#context-sizing-num_ctx)). Tokens are written to `out` as they
+   arrive, and accumulated so verification can see the finished answer.
+
+   The endpoint is whatever `ollama_url` resolves to — Ollama directly, or the semantic
+   cache in front of it ([caching.md](caching.md)). Temperature is pinned so the same
+   question gives the same answer either way; left unset, Ollama samples at its own
+   default and a cached run and an uncached run are not comparable.
 6. **Verify** (optional) — if a verifier is attached, the answer is checked against the
    passages it came from and a grounding report is appended.
 

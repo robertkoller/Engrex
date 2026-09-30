@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -51,10 +52,23 @@ func classify(err error) (string, string) {
 		strings.Contains(text, "database is busy"):
 		return protocol.CodeIndexUnavailable, "the index is busy — an ingestion is probably in flight; try again in a moment"
 	case strings.Contains(text, "connection refused"), strings.Contains(text, "no such host"),
-		strings.Contains(text, "11434"):
+		strings.Contains(text, embedderHostPort()):
 		return protocol.CodeEmbedderUnavailable, "the local embedding model (Ollama) is not reachable"
 	}
 	return protocol.CodeInternalError, err.Error()
+}
+
+// embedderHostPort is the host:port generation and embedding calls go to, used to
+// recognize a dial failure by the address in its message. Read from configuration rather
+// than hardcoded, because the semantic cache in cache/ moves that address — and matching
+// on the wrong one would let an unreachable-embedder error through as a raw internal
+// error string.
+func embedderHostPort() string {
+	parsed, err := url.Parse(config.OllamaURL())
+	if err != nil || parsed.Host == "" {
+		return "11434"
+	}
+	return parsed.Host
 }
 
 func (socket *Socket) handleReadOnly(conn net.Conn, command protocol.Command) {

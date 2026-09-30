@@ -12,12 +12,13 @@ These docs explain how each part works.
 | [data-model.md](data-model.md) | The SQLite schema (`chunks`, `vec_chunks`, `fts_chunks`, `relations`, `documents`), `sqlite-vec`, and FTS5 |
 | [rag-pipeline.md](rag-pipeline.md) | Chunking, embedding, hybrid retrieval (vector + BM25, rank fusion), prompt building, and streaming answers |
 | [ingestion.md](ingestion.md) | Every way content gets in: CLI, hotkey, file watcher, browser extension — supported file types, re-ingestion, origin metadata, and RawText stubs |
-| [daemon.md](daemon.md) | The background daemon and its three servers (Unix socket, HTTP, file watcher) |
+| [daemon.md](daemon.md) | The background daemon and its four servers (Unix socket, HTTP, graph, file watcher) |
 | [mcp.md](mcp.md) | The MCP interface: the three read-only tools, the trust boundary, and Claude Desktop setup |
 | [ui.md](ui.md) | The Swift menu-bar app: hotkeys, the query window, themes, file upload |
 | [development.md](development.md) | Building, installing, testing, the launchd agent, and the macOS gotchas |
 | [evaluation.md](evaluation.md) | Scoring retrieval quality: the golden set, `engrex eval`, recall@k / MRR, baselines, `doctor` and `reindex` |
 | [retrieval-stages.md](retrieval-stages.md) | The optional stages — query rewriting, reranking, citation verification — and why each is off by default |
+| [caching.md](caching.md) | The semantic cache in front of Ollama: prompt splitting, thresholds measured rather than guessed, and what it actually saves. Deeper notes live in [`cache/docs/`](../cache/docs/) |
 | [hnsw.md](hnsw.md) | The from-scratch HNSW index, its benchmark methodology, and where it does and doesn't beat brute force |
 | [rag-upgrade-plan.md](rag-upgrade-plan.md) | Audit of the current retrieval pipeline and the phased plan to take it to production-grade RAG |
 
@@ -33,4 +34,6 @@ There are three moving parts:
 3. **Ollama** — a local server providing the embedding model (`nomic-embed-text`)
    and the generation model (`llama3.2`).
 
-Everything is local. The only network calls are to `localhost:11434` (Ollama).
+Everything is local. The only network calls are to Ollama on `localhost:11434` — or, with
+the semantic cache running, to the cache proxy on `localhost:11435`, which forwards to
+Ollama. Nothing leaves the machine either way.

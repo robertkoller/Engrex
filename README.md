@@ -89,6 +89,7 @@ engrex/
 │   ├── protocol/         # Socket wire types + error codes shared by daemon and clients
 │   ├── config/           # ~/.engrex/config.json (MCP toggle + generation model)
 │   └── daemon/           # Ties the three listeners together
+├── cache/                # Semantic caching proxy (own binary, no CGO) — see docs/caching.md
 ├── eval/                 # golden.json (question set) + baseline.json (committed numbers)
 ├── ui/                   # Swift menu-bar app (Xcode project)
 ├── extension/            # Browser extension (vanilla JS, Manifest V3)
@@ -189,7 +190,8 @@ go mod download
 
 ### 1. Start Ollama
 
-Ollama must be running before the daemon starts (the daemon pings it on startup).
+Ollama must be running before anything else starts — the daemon pings its configured
+endpoint on startup and exits if nothing answers.
 
 ```bash
 ollama serve
@@ -198,11 +200,32 @@ ollama serve
 ### 2. Install and start the daemon
 
 ```bash
-make install     # builds bin/engrex and installs to /usr/local/bin
+make install     # builds and installs both engrex and engrex-cache
 engrex daemon    # run in its own terminal so you see logs; Ctrl+C to stop
 ```
 
-### 3. Use it
+### 3. Start the semantic cache (recommended)
+
+The cache sits between Engrex and Ollama and serves questions it has already answered.
+A repeated question drops from ~13s to ~50ms. See [docs/caching.md](docs/caching.md).
+
+```bash
+make stack-start   # writes the launchd agent, starts the proxy, points Engrex at it,
+                   # and starts the daemon — in that order
+make stack-status  # ollama / cache / daemon, and which URL Engrex is using
+```
+
+Order matters: the proxy has to be listening before the daemon starts, because the daemon
+resolves and pings its Ollama URL once at construction. Both are `KeepAlive` launchd
+agents, so getting it wrong self-heals within a few seconds — this just avoids the noise.
+
+To run without it:
+
+```bash
+make stack-stop    # unloads the cache agent and points Engrex back at Ollama
+```
+
+### 4. Use it
 
 ```bash
 # Save something (goes through the daemon)
@@ -342,7 +365,7 @@ make compile   # build the binary to bin/engrex (no sudo)
 make build     # compile + install to /usr/local/bin — what the daemon runs
 make test      # run all tests
 make eval      # score retrieval against the golden set
-make launch    # build, install, and run the menu-bar app in the foreground
+make app       # build, install, and run the menu-bar app in the foreground
 ```
 
 ⚠️ `make build` installs because the daemon executes `/usr/local/bin/engrex`. After
@@ -403,6 +426,14 @@ Headlines:
 - **Reranking, query rewriting, citation verification** — opt-in stages behind
   interfaces, each degrading gracefully to the plain pipeline on failure. See
   [docs/retrieval-stages.md](docs/retrieval-stages.md).
+- **Semantic caching layer** — a drop-in proxy speaking the Ollama API that recognizes
+  requests it has already answered. It splits each prompt rather than embedding it whole,
+  hashing the retrieved context into the key and matching only the question by meaning,
+  so a stored answer can never be served for different passages. **69.9% hit rate at a
+  measured 0.00% wrong-answer rate on a 2,000-request workload**, hits served ~5,000x
+  faster than a generation. Thresholds are measured against the embedding model rather
+  than copied from a tutorial — on `nomic-embed-text` the usual 0.95 admits 5.6% of real
+  paraphrases. See [docs/caching.md](docs/caching.md).
 
 ---
 

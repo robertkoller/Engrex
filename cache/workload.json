@@ -1,0 +1,113 @@
+{
+  "_comment": "The query mix the load test replays. Base questions are the eval golden set (eval/golden.json) so the workload is the same material the retrieval evaluation uses; the paraphrases are written by hand to be the same question in different words, which is what a semantic cache is supposed to catch. The topics are combined into questions nobody has asked, to stand for the share of any real workload a cache can do nothing about — they have to be genuinely different text, or the unique share is not unique and the hit rate is flattered.",
+  "questions": [
+    {
+      "question": "what distance threshold does engrex use for deduplication?",
+      "paraphrases": [
+        "what dedup distance threshold does engrex use?",
+        "how close do two chunks have to be before engrex treats them as duplicates?",
+        "which cosine distance counts as a duplicate in engrex?"
+      ]
+    },
+    {
+      "question": "how does the daemon avoid double-ingesting a file the socket already handled?",
+      "paraphrases": [
+        "what stops the daemon ingesting the same file twice?",
+        "how is double ingestion prevented between the socket and the watcher?"
+      ]
+    },
+    {
+      "question": "what happens when I edit and re-save a file that was already ingested?",
+      "paraphrases": [
+        "if I change a file that is already indexed, what does engrex do?",
+        "how does re-saving an ingested file get handled?"
+      ]
+    },
+    {
+      "question": "how does hybrid retrieval combine vector and keyword results?",
+      "paraphrases": [
+        "how are the vector and BM25 rankings fused?",
+        "what does engrex do to merge dense and sparse search results?"
+      ]
+    },
+    {
+      "question": "why is reranking off by default?",
+      "paraphrases": [
+        "what is the reason reranking is not enabled out of the box?",
+        "why does engrex not rerank unless asked?"
+      ]
+    },
+    {
+      "question": "what does the verification stage actually check?",
+      "paraphrases": [
+        "how does citation verification decide a claim is grounded?",
+        "what is the groundedness check doing?"
+      ]
+    },
+    {
+      "question": "how is the context window size chosen for a prompt?",
+      "paraphrases": [
+        "how does engrex pick num_ctx?",
+        "what sets the context window for a generation call?"
+      ]
+    },
+    {
+      "question": "where does engrex store its database?",
+      "paraphrases": [
+        "what path holds the engrex sqlite file?"
+      ]
+    },
+    {
+      "question": "what does the HNSW benchmark measure?",
+      "paraphrases": [
+        "what numbers does engrex bench report?"
+      ]
+    },
+    {
+      "question": "how does the browser extension send a capture?",
+      "paraphrases": [
+        "what endpoint does the extension post page text to?"
+      ]
+    }
+  ],
+  "passages": [
+    "Deduplication uses a cosine distance threshold of 0.451, converted from the previously calibrated L2 value of 0.95.",
+    "The daemon owns the SQLite database and serializes every write through a single process, so concurrent writers cannot fight over it.",
+    "Hybrid retrieval runs a vector KNN and a BM25 keyword search, then fuses the two rankings with reciprocal rank fusion at k=60.",
+    "Reranking is off by default because it costs an extra local LLM call and has not yet been shown to help on this corpus.",
+    "Verification splits an answer into claims and tests each one against the retrieved passages, reporting a groundedness rate.",
+    "The context window is len(prompt)/3 plus headroom, clamped to between 4096 and 32768 tokens.",
+    "The database lives at ~/.engrex/engrex.db and the file watcher watches ~/Engrex for dropped files.",
+    "The HNSW benchmark reports build time, exact versus approximate query latency, speedup, recall and memory.",
+    "The browser extension posts captured page text to 127.0.0.1:7777/capture, which the daemon's HTTP server ingests.",
+    "RawText stubs are written into a subfolder that the watcher does not watch, so they are never re-ingested."
+  ],
+  "topics": [
+    "the file watcher's debounce interval",
+    "reciprocal rank fusion",
+    "the HNSW entry point",
+    "chunk overlap during ingestion",
+    "the Unix socket protocol",
+    "PDF text extraction",
+    "the Swift menu bar hotkey",
+    "sqlite-vec distance metrics",
+    "the MCP trust boundary",
+    "BM25 scoring in FTS5",
+    "launchd keep-alive behaviour",
+    "the browser extension manifest",
+    "heading path metadata",
+    "the golden evaluation set",
+    "prompt context window sizing",
+    "document title resolution",
+    "the RawText stub folder",
+    "embedding task prefixes",
+    "listwise reranking prompts",
+    "claim splitting during verification"
+  ],
+  "unique_templates": [
+    "how does %s interact with %s?",
+    "what did I save about %s compared with %s?",
+    "does %s have any bearing on %s?",
+    "explain the relationship between %s and %s"
+  ]
+}

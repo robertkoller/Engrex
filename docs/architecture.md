@@ -26,10 +26,14 @@ Engrex is not one program — it's a long-running **daemon** plus a set of thin
                                          │                 │
                               SQLite + sqlite-vec     Ollama (localhost:11434)
                               ~/.engrex/engrex.db     embeddings + generation
+                                                              ▲
+                                                              │ optional
+                                                   engrex-cache (localhost:11435)
+                                                   semantic cache — see caching.md
 ```
 
 - **Daemon** — a single Go process (`engrex daemon`). It owns the SQLite database
-  and the RAG pipeline, and runs three concurrent listeners (see [daemon.md](daemon.md)).
+  and the RAG pipeline, and runs four concurrent listeners (see [daemon.md](daemon.md)).
 - **Clients** — the CLI, the Swift app, the browser extension, and MCP clients. None of
   them touch the database or Ollama directly for writes/queries; they send the daemon a
   command and render what comes back. (The CLI's read-only `list`/`clear`/`debug` are the
@@ -40,6 +44,10 @@ Engrex is not one program — it's a long-running **daemon** plus a set of thin
   the daemon stays the single SQLite owner. Off by default; see [mcp.md](mcp.md).
 - **Ollama** — a separate local server. Engrex calls it for embeddings (`/api/embed`)
   and for answer generation (`/api/generate`).
+- **The semantic cache** — optional, and off unless configured. `engrex-cache` speaks the
+  same API as Ollama, so pointing Engrex at it is a change of one config value
+  (`ollama_url`, or `ENGREX_OLLAMA_URL`). It serves requests it has already answered and
+  forwards the rest. See [caching.md](caching.md).
 
 ## Why a daemon?
 
@@ -117,7 +125,7 @@ chunks to the LLM, MCP hands them to the calling model. See [mcp.md](mcp.md).
 |---|---|
 | `~/.engrex/engrex.db` | The SQLite database (chunks + vectors) |
 | `~/.engrex/daemon.sock` | The Unix socket the CLI/app/MCP bridge connect to |
-| `~/.engrex/config.json` | User settings — `mcp_enabled`, `generate_model`, `deep_model` (optional; defaults apply when absent) |
+| `~/.engrex/config.json` | User settings — `mcp_enabled`, `generate_model`, `deep_model`, `ollama_url` (optional; defaults apply when absent) |
 | `~/Engrex/` | The watched "inbox" — drop files here to ingest them |
 | `~/Engrex/RawText/` | `.txt` stubs of CLI/hotkey/web captures, for browsing (not watched) |
 | `~/Library/LaunchAgents/com.robertkoller.engrex.plist` | Optional launchd agent for auto-start |

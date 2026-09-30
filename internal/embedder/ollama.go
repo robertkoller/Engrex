@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
+	"strings"
 )
 
 // DefaultModel is the Ollama embedding model used by Engrex.
@@ -64,6 +66,10 @@ func (embedder *Embedder) embed(text string) ([]float32, error) {
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(response.Body)
+		return nil, fmt.Errorf("ollama returned %d: %s", response.StatusCode, strings.TrimSpace(string(raw)))
+	}
 
 	var result struct {
 		Embeddings [][]float32 `json:"embeddings"`
@@ -118,5 +124,8 @@ func (embedder *Embedder) Ping() error {
 		return fmt.Errorf("ollama isn't running, start it with: ollama serve")
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama returned status %d, is it running?", response.StatusCode)
+	}
 	return nil
 }

@@ -93,15 +93,15 @@ Terminal, no Xcode GUI needed (Xcode must still be installed — `xcodebuild` sh
 it):
 
 ```bash
-make app          # Release build → bin/app/Build/Products/Release/EngrexUI.app
+make app-build    # Release build → bin/app/Build/Products/Release/EngrexUI.app
 make app-debug    # faster, skips optimization
 make app-install  # quits the running app, replaces /Applications/EngrexUI.app
-make launch       # build + install + run in the FOREGROUND (Ctrl-C quits)
-make app-run      # same but detached
+make app          # build + install + run in the FOREGROUND (Ctrl-C quits); alias for app-run
+make app-open     # same but detached
 make app-clean
 ```
 
-`launch` executes the binary inside the bundle rather than `open`-ing the `.app` —
+`app-run` executes the binary inside the bundle rather than `open`-ing the `.app` —
 `open` hands off to LaunchServices and returns, leaving the app detached with no way to
 stop it from that terminal. It runs the `/Applications` copy because macOS ties
 accessibility and input-monitoring permissions to a bundle's **path**; running the
