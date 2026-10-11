@@ -262,11 +262,36 @@ docs/                  you are here
 |---|---|---|
 | `mcp_enabled` | `false` | Gates the read-only MCP commands |
 | `generate_model` | `llama3.2` | Model used for answers and all optional stages |
-| `deep_model` | `qwen3:4b` | The "think harder" alternative the app can switch to per query |
+| `deep_model` | `qwen3:8b` | The "think harder" alternative the app can switch to per query |
+| `gemini_model` | `gemini-3.8-flash` | Cloud model offered when a Gemini key is set (see below) |
 | `ollama_url` | `http://localhost:11434` | Where generation and embedding calls go. Set it to the cache proxy to put it in the path — `engrex-cache enable` writes it |
 
 Model resolution order: `--model` flag → `ENGREX_GENERATE_MODEL` →
-`generate_model` → default. `ENGREX_DEEP_MODEL` overrides `deep_model` the same way.
+`generate_model` → default. `ENGREX_DEEP_MODEL` overrides `deep_model` the same way, and
+`ENGREX_GEMINI_MODEL` overrides `gemini_model`.
+
+All Ollama generation calls send `"think": false`. qwen3 thinks by default, which about
+doubled answer time without helping grounded answers. qwen3:4b ignores the flag and
+writes its reasoning into the answer, which is why the deep model moved to qwen3:8b.
+
+### Gemini (optional, cloud)
+
+Off by default. Any model name starting with `gemini-` is sent to Google's
+`streamGenerateContent` endpoint instead of Ollama (`internal/gemini`). Only the answer
+step goes to the cloud. Embedding, retrieval and ingestion stay local, but **the
+passages retrieved for that question are sent to Google**. The daemon logs each
+cloud answer, and the cache doesn't cover these calls.
+
+The key is never stored in `config.json`. It's read on every query, in this order:
+`GEMINI_API_KEY` in the environment, the file named by `ENGREX_ENV_FILE`, the repo's
+`.env` (its path is baked in at build time through `-ldflags`, so launchd finds it
+too), then `~/.engrex/.env`. `.env` is gitignored. The `models` socket command reports
+`cloud` only when a key is found. The menu bar's **Use Gemini** item greys out
+without one and picks the key up the next time the menu opens, with no restart.
+
+Gemini counts its thinking against `maxOutputTokens`, so that's 4096 rather than
+Ollama's 400, with `thinkingLevel: "low"`. A finish reason other than `STOP` is
+written into the answer, so a cut-off answer is visible.
 `ollama_url` resolves the same way, from `ENGREX_OLLAMA_URL` then the file then the
 default, and is read **once** when the pipeline is constructed — so changing it needs a
 daemon restart.

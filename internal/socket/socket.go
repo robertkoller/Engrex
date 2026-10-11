@@ -81,6 +81,7 @@ func (socket *Socket) handleConnection(conn net.Conn) {
 		payload := protocol.ModelsPayload{
 			Default: socket.rag.GenerateModel(),
 			Deep:    config.DeepModelName(),
+			Cloud:   config.GeminiModelIfConfigured(),
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {

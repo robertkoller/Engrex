@@ -3,3 +3,4 @@ notes2.md
 build/
 docs/developer/progression/
 .DS_Store
+.env

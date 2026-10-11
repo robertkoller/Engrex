@@ -131,6 +131,8 @@ class SocketClient {
     struct Models {
         let defaultModel: String
         let deep: String
+        // Empty when the daemon has no Gemini key
+        let cloud: String
     }
 
     // Asks the daemon which models are available. Calls back with nil on any failure —
@@ -149,7 +151,8 @@ class SocketClient {
                 return
             }
             DispatchQueue.main.async {
-                completion(Models(defaultModel: defaultModel, deep: deep))
+                let cloud = payload["cloud"] as? String ?? ""
+                completion(Models(defaultModel: defaultModel, deep: deep, cloud: cloud))
             }
         }
     }

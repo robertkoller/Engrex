@@ -185,6 +185,7 @@ func (verifier *LLMVerifier) generate(prompt string) (string, error) {
 		"model":  verifier.Model,
 		"prompt": prompt,
 		"stream": false,
+		"think":  false,
 		"options": map[string]any{
 			"temperature": 0,
 			"num_ctx":     contextWindowFor(prompt),

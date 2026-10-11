@@ -129,6 +129,7 @@ func (rewriter *LLMRewriter) generate(prompt string) (string, error) {
 		"model":  rewriter.Model,
 		"prompt": prompt,
 		"stream": false,
+		"think":  false,
 		"options": map[string]any{
 			// Deterministic, so the same question decomposes identically across eval
 			// runs and a measured delta reflects the change under test.

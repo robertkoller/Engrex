@@ -148,6 +148,7 @@ func (reranker *LLMReranker) generate(prompt string) (string, error) {
 		"model":  reranker.Model,
 		"prompt": prompt,
 		"stream": false,
+		"think":  false,
 		"options": map[string]any{
 			// Ranking should be deterministic — sampling here means the same question
 			// reorders differently run to run, which makes the eval numbers noise.

@@ -33,6 +33,10 @@ created or written there, after a 500ms debounce it's ingested:
   - `.pdf` (text extracted via PDFium, see [PDF extraction](#pdf-extraction))
   - `.docx` (unzipped and its WordprocessingML flattened to text — stdlib only, no
     dependency; see `extractDOCX`)
+  - `.pptx` (unzipped into markdown with a `# Slide N` heading per slide and its
+    speaker notes underneath; see `extractPPTX`). Slide order comes from
+    `ppt/presentation.xml`, not the `slideN.xml` file names, which keep their
+    original numbers after a deck is reordered.
   - Plain-text and code/config files read as-is: `.txt`, `.go`, `.py`, `.js`, `.ts`,
     `.java`, `.c`, `.cpp`, `.rs`, `.sh`, `.json`, `.yaml`, `.yml`, `.toml`, `.csv`,
     `.tsv`, `.org`, `.rst`, `.tex`, `.log`
@@ -68,6 +72,7 @@ every chunk a heading path — see [rag-pipeline.md](rag-pipeline.md#chunking).
 | Extension | Content type | Split strategy |
 |---|---|---|
 | `.md`, `.markdown` | `markdown` | Heading boundaries, then sentences within a section |
+| `.pptx` | `markdown` | One section per slide (heading path `Slide N`) |
 | `.go`, `.py`, `.js`, `.ts`, `.java`, `.c`, `.cpp`, `.rs`, `.sh`, `.json`, `.yaml`, `.yml`, `.toml`, `.tex` | `code:<language>` | Top-level declarations, line-windowed fallback |
 | everything else | `text` | Sentence packing |
 
@@ -147,6 +152,51 @@ The extension (`extension/`) POSTs to the daemon's HTTP endpoint at
 `127.0.0.1:7777/capture` with `{text, url, title}`. It captures the current selection,
 or the whole page's text if nothing is selected. The daemon ingests with
 `source = title`, `origin = url`. See [daemon.md](daemon.md) for the endpoint.
+
+### Google Docs and Slides
+
+Docs draws its text on a `<canvas>` and Slides uses SVG, so `innerText` returns
+nothing useful on them. On `docs.google.com/document/d/<id>` and
+`/presentation/d/<id>` tabs, the extension fetches Google's own export instead (the
+same thing File > Download does). Selection is ignored on these pages:
+
+| Page | Export | Captured as |
+|---|---|---|
+| Docs | `/document/d/<id>/export?format=md` | `format: "markdown"`, so it's chunked on headings |
+| Slides | `/presentation/d/<id>/export/txt` | plain text |
+
+The fetch uses the browser's Google session, so any file you can open works without
+OAuth. If you're signed out, Google redirects to a login page; the extension spots
+the HTML response and shows "Couldn't export from Google". The captured `url` is cut
+down to `https://docs.google.com/<kind>/d/<id>`, so `/edit`, `#slide=...` and
+`?tab=...` variants all re-ingest as one document instead of becoming duplicates.
+
+### Google Drive files
+
+The viewer at `drive.google.com/file/d/<id>/view` only renders the pages you've
+scrolled to, so scraping it got the first few pages wrapped in Drive's menus. The
+extension instead downloads the real file from
+`drive.google.com/uc?export=download&id=<id>` (which redirects to
+`drive.usercontent.google.com`) and POSTs the raw bytes to `/capture-file`, with
+`name`, `url` and `title` as query parameters. The file name comes from the
+`Content-Disposition` header, or the tab title if that's missing.
+
+`/capture-file` refuses types `ingest.IsSupported` doesn't know (415), writes the
+upload to a temp file with the same extension, runs `ingest.ExtractText` on it (so a
+Drive PDF goes through PDFium the same way a dropped one does), deletes the temp
+file, and ingests with `source = file name`, `origin = https://drive.google.com/file/d/<id>`.
+Uploads are capped at 100 MB. Above about that size Drive sends a "can't scan for
+viruses" HTML page instead of the file, which the extension reports as an error.
+
+For `/u/N/` URLs (a second signed-in Google account), the extension passes the
+account along (`/u/N/` for Docs/Slides, `authuser=N` for Drive) so the download runs
+as the account the tab is using.
+
+A capture with `format: "markdown"` goes through `ingest.CleanMarkdown` and
+`rag.AddTyped(..., "markdown")`, because the content type can't be read off a
+title the way it is for a file path. `CleanMarkdown` also removes the
+`![][image1]` references and base64 `[image1]: <data:...>` definitions that Docs
+puts in its markdown export.
 
 ## Adding a file through the app (the `addfile` command)
 

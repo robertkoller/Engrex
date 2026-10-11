@@ -45,7 +45,7 @@ func ClaimPending(path string) bool {
 func IsSupported(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".md", ".markdown", ".txt", ".html", ".htm", ".pdf", ".go", ".py", ".js", ".ts", ".java", ".c",
-		".cpp", ".rs", ".sh", ".json", ".yaml", ".yml", ".toml", ".csv", ".tsv", ".org", ".rst", ".tex", ".log", ".docx":
+		".cpp", ".rs", ".sh", ".json", ".yaml", ".yml", ".toml", ".csv", ".tsv", ".org", ".rst", ".tex", ".log", ".docx", ".pptx":
 		return true
 	default:
 		return false
@@ -76,8 +76,12 @@ func ExtractText(path string) (string, error) {
 		}
 		return text, nil
 	}
-	if extension == ".docx" {
-		text, err := extractDOCX(path)
+	if extension == ".docx" || extension == ".pptx" {
+		extract := extractDOCX
+		if extension == ".pptx" {
+			extract = extractPPTX
+		}
+		text, err := extract(path)
 		if err != nil {
 			return "", err
 		}
@@ -195,6 +199,11 @@ var (
 	displayMathRegex = regexp.MustCompile(`(?s)\$\$(.+?)\$\$`)
 	inlineMathRegex  = regexp.MustCompile(`\$(.+?)\$`)
 	horizontalRegex  = regexp.MustCompile(`(?m)^[-*]{3,}\s*$`)
+
+	// Google Docs' markdown export puts images in as ![][image1] with the base64 data
+	// in a reference definition at the bottom
+	referenceImageRegex = regexp.MustCompile(`!\[[^\]]*\]\[[^\]]*\]`)
+	dataURIDefinition   = regexp.MustCompile(`(?m)^\[[^\]]+\]:\s*<?data:[^\n]*$`)
 )
 
 // cleanMarkdown strips inline formatting noise while leaving the document's structure
@@ -208,6 +217,8 @@ var (
 func cleanMarkdown(input string) string {
 	text := input
 
+	text = dataURIDefinition.ReplaceAllString(text, "")
+	text = referenceImageRegex.ReplaceAllString(text, "")
 	text = inlineCodeRegex.ReplaceAllString(text, "$1")
 	text = imageRegex.ReplaceAllString(text, "")
 	text = linkRegex.ReplaceAllString(text, "$1")
@@ -236,7 +247,8 @@ var codeExtensions = map[string]string{
 // come back as "text" — whatever structure they had is gone by then.
 func ContentType(path string) string {
 	extension := strings.ToLower(filepath.Ext(path))
-	if extension == ".md" || extension == ".markdown" {
+	// .pptx is extracted as markdown with a heading per slide
+	if extension == ".md" || extension == ".markdown" || extension == ".pptx" {
 		return chunker.TypeMarkdown
 	}
 	if language, isCode := codeExtensions[extension]; isCode {
@@ -254,4 +266,10 @@ func stripHTML(input string) string {
 	text = strings.ReplaceAll(text, "&#39;", "'")
 	text = strings.ReplaceAll(text, "&nbsp;", " ")
 	return text
+}
+
+// CleanMarkdown is cleanMarkdown for markdown that didn't come from a file, like a
+// Google Docs export captured by the browser extension
+func CleanMarkdown(input string) string {
+	return cleanMarkdown(input)
 }

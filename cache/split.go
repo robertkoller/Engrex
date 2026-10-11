@@ -1,6 +1,10 @@
 package cache
 
-import "strings"
+import (
+	"regexp"
+	"sort"
+	"strings"
+)
 
 // Parts is a prompt cut into the piece that has to match exactly and the piece that is
 // matched by meaning.
@@ -39,6 +43,10 @@ type marker struct {
 
 	// end empty means the semantic part runs to the end of the prompt.
 	end string
+
+	// canonical, if set, rewrites the context part before it's hashed so prompts that
+	// differ only in ways that don't change the answer share a namespace
+	canonical func(context string) string
 }
 
 // markers are the prompt formats Engrex itself emits. The prefixes and delimiters are
@@ -48,11 +56,12 @@ type marker struct {
 var markers = []marker{
 	{
 		// internal/rag.buildPrompt
-		name:   "engrex-answer",
-		class:  ClassAnswer,
-		prefix: "You are a personal knowledge assistant with access to the user's OWN saved notes",
-		start:  "\nQUESTION: ",
-		end:    "\n\nAnswer from the CONTEXT above only.",
+		name:      "engrex-answer",
+		class:     ClassAnswer,
+		prefix:    "You are a personal knowledge assistant with access to the user's OWN saved notes",
+		start:     "\nQUESTION: ",
+		end:       "\n\nAnswer from the CONTEXT above only.",
+		canonical: canonicalAnswerContext,
 	},
 	{
 		// internal/rag.buildNoContextPrompt — the question is the whole tail here.
@@ -128,11 +137,80 @@ func (candidate marker) apply(prompt string) (Parts, bool) {
 	}
 	semanticStart := startIndex + len(candidate.start)
 
+	context := joinContext(prompt[:semanticStart], prompt[endIndex:])
+	if candidate.canonical != nil {
+		context = candidate.canonical(context)
+	}
 	return Parts{
-		Context:  joinContext(prompt[:semanticStart], prompt[endIndex:]),
+		Context:  context,
 		Semantic: prompt[semanticStart:endIndex],
 		Class:    candidate.class,
 	}, true
+}
+
+var (
+	manifestLineRegex = regexp.MustCompile(`(?m)^  \d+\. `)
+	passageStartRegex = regexp.MustCompile(`(?m)^\[\d+\] document: `)
+)
+
+// canonicalAnswerContext sorts the document manifest and the retrieved passages and
+// drops their numbering. Rewordings of a question usually retrieve the same passages
+// but rank them differently, and hashing them in rank order made those all miss.
+// The passages are still byte for byte the same, so a hit is still an answer generated
+// from identical material
+func canonicalAnswerContext(context string) string {
+	const manifestHeader = "\nSAVED DOCUMENTS these passages come from"
+	const contextHeader = "\nCONTEXT:\n"
+
+	manifestIndex := strings.Index(context, manifestHeader)
+	contextIndex := strings.Index(context, contextHeader)
+	if manifestIndex < 0 || contextIndex < manifestIndex {
+		return context
+	}
+
+	// The manifest is a header line, the numbered documents, then a closing line
+	manifest := context[manifestIndex:contextIndex]
+	headerEnd := strings.Index(manifest, "\n  ")
+	if headerEnd >= 0 {
+		listEnd := strings.Index(manifest[headerEnd:], "\n\n")
+		if listEnd >= 0 {
+			listEnd += headerEnd
+			lines := strings.Split(manifest[headerEnd+1:listEnd], "\n")
+			for index, line := range lines {
+				lines[index] = manifestLineRegex.ReplaceAllString(line, "  ")
+			}
+			sort.Strings(lines)
+			manifest = manifest[:headerEnd+1] + strings.Join(lines, "\n") + manifest[listEnd:]
+		}
+	}
+
+	// The passages run from the CONTEXT header to the question, which the split
+	// already removed, so the rest of the context is the question's trailing marker
+	passagesStart := contextIndex + len(contextHeader)
+	passageText := context[passagesStart:]
+	starts := passageStartRegex.FindAllStringIndex(passageText, -1)
+	if len(starts) == 0 {
+		return context[:manifestIndex] + manifest + context[contextIndex:]
+	}
+
+	// Anything after the last passage's own text (the question marker) stays put
+	tailIndex := strings.LastIndex(passageText, "\nQUESTION: ")
+	if tailIndex < starts[len(starts)-1][0] {
+		tailIndex = len(passageText)
+	}
+	passages := make([]string, len(starts))
+	for index, start := range starts {
+		end := tailIndex
+		if index+1 < len(starts) {
+			end = starts[index+1][0]
+		}
+		// Trimmed because the last passage gives up a newline to the question marker
+		passage := strings.TrimRight(passageText[start[0]:end], "\n")
+		passages[index] = passageStartRegex.ReplaceAllString(passage, "document: ")
+	}
+	sort.Strings(passages)
+
+	return context[:manifestIndex] + manifest + contextHeader + strings.Join(passages, "\n\n") + passageText[tailIndex:]
 }
 
 // TailSplitter is the fallback for prompts nobody has taught the cache about: the last

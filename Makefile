@@ -3,6 +3,10 @@ CGO_CFLAGS    := -I$(SQLITE_PREFIX)/include
 CGO_LDFLAGS   := -L$(SQLITE_PREFIX)/lib -lsqlite3
 BUILD_TAGS    := libsqlite3
 
+# Bakes the repo's .env path into the binary so the daemon finds GEMINI_API_KEY from any
+# working directory, including under launchd
+LDFLAGS       := -X github.com/robertkoller/engrex/internal/config.RepoEnvFile=$(CURDIR)/.env
+
 export CGO_CFLAGS
 export CGO_LDFLAGS
 
@@ -44,7 +48,7 @@ eval-save: compile
 # Compile only, no install. Used by targets that run ./bin/engrex directly and so
 # don't need the copy in /usr/local/bin — keeps them from triggering a sudo prompt.
 compile:
-	go build -tags $(BUILD_TAGS) -o bin/engrex ./cmd/engrex
+	go build -tags $(BUILD_TAGS) -ldflags "$(LDFLAGS)" -o bin/engrex ./cmd/engrex
 
 # `build` compiles AND installs, because the daemon executes /usr/local/bin/engrex.
 # Compiling alone leaves the daemon serving whatever was installed last time, which

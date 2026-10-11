@@ -150,7 +150,7 @@ brew install go sqlite ollama
 
 ```bash
 ollama pull nomic-embed-text   # embedding model (~270MB)
-ollama pull qwen3:4b           # generation model (~2.5GB) — recommended
+ollama pull qwen3:8b           # deep / recommended generation model (~5.2GB)
 ```
 
 `qwen3:4b` is the recommended generation model. `llama3.2:3b` is the built-in default
@@ -162,6 +162,12 @@ saved — it invents plausible-looking sources instead. Measured on the same cor
 | `llama3.2:3b` | 3.2 GB | ❌ |
 | `qwen3:4b` | 4.0 GB | ✅ |
 | `qwen3:8b` | 6.4 GB | ✅ (no better than 4b, and slower) |
+
+Update (2026-10-11): with thinking off (`"think": false`, which Engrex now always
+sends) qwen3:8b answered harder questions correctly where llama3.2 contradicted its own
+context, and it's now the default `deep_model`. qwen3:4b ignores `think: false` and
+writes its reasoning into the answer. An optional cloud model (Gemini) can also be
+switched on from the menu bar. See [docs/development.md](docs/development.md#gemini-optional-cloud).
 
 Point Engrex at it in `~/.engrex/config.json`:
 
@@ -238,7 +244,7 @@ engrex query "how does Go handle concurrency?"
 engrex query "how does Go handle concurrency? --source --date"
 
 # Drop files into ~/Engrex/ to ingest them
-# (.md .txt .html .pdf .docx, plus common code/config files like .go .py .json .csv)
+# (.md .txt .html .pdf .docx .pptx, plus common code/config files like .go .py .json .csv)
 # Or use the Swift app (⌘⇧Space) and the browser extension (⌘⇧E)
 
 engrex --help    # all commands

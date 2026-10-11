@@ -33,15 +33,33 @@ type Config struct {
 	// DeepModel is the slower, more capable model a client can switch to per query.
 	// Empty means DefaultDeepModel.
 	DeepModel string `json:"deep_model,omitempty"`
+
+	// GeminiModel is the cloud model offered when a Gemini API key is set. Empty means
+	// DefaultGeminiModel. The key itself never goes in this file, see GeminiAPIKey
+	GeminiModel string `json:"gemini_model,omitempty"`
 }
 
 // DefaultDeepModel is the "think harder" alternative offered alongside the default.
 //
-// The pairing is deliberate: llama3.2 answers in ~11s but invents sources when asked
-// which document something came from, while qwen3:4b answers correctly and takes
-// ~29s. Neither is strictly better, so the choice belongs to the person asking rather
-// than to a config file.
-const DefaultDeepModel = "qwen3:4b"
+// llama3.2 answers in ~11s but contradicts its own context on harder questions. qwen3:8b
+// with thinking off got both of the questions llama3.2 failed right in ~22s. qwen3:4b
+// was the old pick, but it ignores think:false and writes its reasoning into the answer
+const DefaultDeepModel = "qwen3:8b"
+
+// DefaultGeminiModel is the newest stable Gemini Flash as of 2026-10-11
+const DefaultGeminiModel = "gemini-3.8-flash"
+
+// GeminiModelName resolves the cloud model the same way GenerateModelName does
+func GeminiModelName() string {
+	if override := strings.TrimSpace(os.Getenv("ENGREX_GEMINI_MODEL")); override != "" {
+		return override
+	}
+	configuration, err := Load()
+	if err == nil && strings.TrimSpace(configuration.GeminiModel) != "" {
+		return strings.TrimSpace(configuration.GeminiModel)
+	}
+	return DefaultGeminiModel
+}
 
 // DeepModelName resolves the deep model the same way GenerateModelName resolves the
 // default one.

@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Engrex Capture",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Save the selected text (or the whole page) to Engrex with its URL and title.",
   "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["http://127.0.0.1:7777/*"],
+  "host_permissions": ["http://127.0.0.1:7777/*", "https://docs.google.com/*", "https://*.googleusercontent.com/*", "https://drive.google.com/*", "https://drive.usercontent.google.com/*"],
   "background": {
     "service_worker": "background.js"
   },

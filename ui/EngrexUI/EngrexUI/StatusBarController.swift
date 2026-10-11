@@ -1,16 +1,18 @@
 import AppKit
 import SwiftUI
 
-class StatusBarController {
+class StatusBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let statusMenu = NSMenu()
     private var queryWindow: QueryWindow?
     private var pollingTimer: Timer?
     private var deepModelItem: NSMenuItem?
+    private var cloudModelItem: NSMenuItem?
     private let socketClient = SocketClient()
 
-    init() {
+    override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
         setupButton()
         setupMenu()
         startPolling()
@@ -22,10 +24,15 @@ class StatusBarController {
     // until the daemon answers, and an unnamed model is sent as empty, which the daemon
     // treats as its default.
     private func loadModelNames() {
-        ModelSetting.shared.refresh(using: socketClient)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.refreshDeepModelLabel()
+        ModelSetting.shared.refresh(using: socketClient) { [weak self] in
+            self?.refreshModelItems()
         }
+    }
+
+    // Re-asks the daemon every time the menu opens, so adding a key to .env shows up
+    // without restarting anything
+    func menuWillOpen(_ menu: NSMenu) {
+        loadModelNames()
     }
 
     private func setupButton() {
@@ -79,6 +86,15 @@ class StatusBarController {
             statusMenu.addItem(deepModelItem)
         }
 
+        cloudModelItem = NSMenuItem(title: ModelSetting.shared.cloudModelLabel,
+                                    action: #selector(toggleCloudModel(_:)),
+                                    keyEquivalent: "g")
+        cloudModelItem?.target = self
+        if let cloudModelItem {
+            statusMenu.addItem(cloudModelItem)
+        }
+        refreshModelItems()
+
         statusMenu.addItem(.separator())
 
         let themeParent = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
@@ -89,6 +105,10 @@ class StatusBarController {
 
         let quitItem = NSMenuItem(title: "Quit Engrex", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusMenu.addItem(quitItem)
+
+        // Enabled state is set by hand so the Gemini item can grey out without a key
+        statusMenu.autoenablesItems = false
+        statusMenu.delegate = self
 
         // Assigning the menu makes clicking the status item show it automatically.
         statusItem.menu = statusMenu
@@ -113,10 +133,25 @@ class StatusBarController {
         sender.state = ModelSetting.shared.useDeepModel ? .on : .off
     }
 
-    // Called once the daemon has reported its model names, so the menu item can show
-    // which model "deep thinking" actually means.
-    func refreshDeepModelLabel() {
-        deepModelItem?.title = ModelSetting.shared.deepModelLabel
+    @objc private func toggleCloudModel(_ sender: NSMenuItem) {
+        ModelSetting.shared.useCloudModel.toggle()
+        refreshModelItems()
+    }
+
+    // Syncs both model items with what the daemon reported. Deep thinking greys out
+    // while Gemini is answering since it has no effect then
+    func refreshModelItems() {
+        let setting = ModelSetting.shared
+        deepModelItem?.title = setting.deepModelLabel
+        deepModelItem?.state = setting.useDeepModel ? .on : .off
+        deepModelItem?.isEnabled = !setting.isUsingCloud
+
+        cloudModelItem?.title = setting.cloudModelLabel
+        cloudModelItem?.state = setting.isUsingCloud ? .on : .off
+        cloudModelItem?.isEnabled = !setting.cloudModel.isEmpty
+        cloudModelItem?.toolTip = setting.cloudModel.isEmpty
+            ? "Put GEMINI_API_KEY in the repo's .env to enable."
+            : "Answers come from Google's Gemini. The passages retrieved from your notes are sent to Google for each question."
     }
 
     @objc private func selectTheme(_ sender: NSMenuItem) {

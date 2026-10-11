@@ -21,6 +21,10 @@ type ModelsPayload struct {
 
 	// Deep is the slower, more capable alternative.
 	Deep string `json:"deep"`
+
+	// Cloud is the Gemini model, or empty when no API key is set. Sending it as a
+	// query's model sends that query's retrieved passages to Google
+	Cloud string `json:"cloud,omitempty"`
 }
 
 const (

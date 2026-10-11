@@ -302,12 +302,8 @@ struct QueryView: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        Text(answer)
-                            .font(.system(size: 16))
-                            .lineSpacing(4)
+                        MarkdownText(markdown: answer, fontSize: 16)
                             .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }

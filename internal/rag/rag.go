@@ -20,6 +20,7 @@ import (
 	"github.com/robertkoller/engrex/internal/chunker"
 	"github.com/robertkoller/engrex/internal/config"
 	"github.com/robertkoller/engrex/internal/embedder"
+	"github.com/robertkoller/engrex/internal/gemini"
 	"github.com/robertkoller/engrex/internal/ingest"
 	"github.com/robertkoller/engrex/internal/rerank"
 	"github.com/robertkoller/engrex/internal/rewrite"
@@ -174,7 +175,12 @@ func (r *RAG) NewLLMVerifier() verify.Verifier {
 // a file updates it in place instead of piling up stale, overlapping copies. Typed
 // cli/hotkey notes have no such identity and are always appended (with dedup).
 func (r *RAG) Add(text string, source string, origin string) error {
-	contentType := ingest.ContentType(source)
+	return r.AddTyped(text, source, origin, ingest.ContentType(source))
+}
+
+// AddTyped is Add for text whose content type can't be read off the source, like a
+// web capture whose source is a page title
+func (r *RAG) AddTyped(text string, source string, origin string, contentType string) error {
 	docTitle := documentTitle(source, origin)
 
 	pieces, err := chunker.ChunkDocument(text, contentType)
@@ -554,10 +560,35 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 		prompt = buildPrompt(question, chunks, options)
 	}
 
+	answer, err := r.generate(out, prompt)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out)
+
+	r.writeGroundingReport(out, answer, chunks)
+	return nil
+}
+
+// generate streams the answer to out and returns it. Gemini models go to the cloud,
+// everything else to Ollama
+func (r *RAG) generate(out io.Writer, prompt string) (string, error) {
+	if gemini.IsModel(r.generateModel) {
+		log.Printf("answering with %s, retrieved passages are sent to Google", r.generateModel)
+		return gemini.New(config.GeminiAPIKey(), r.generateModel).Stream(prompt, out)
+	}
+	return r.generateOllama(out, prompt)
+}
+
+// generateOllama streams an answer from Ollama
+func (r *RAG) generateOllama(out io.Writer, prompt string) (string, error) {
 	body, err := json.Marshal(map[string]any{
 		"model":  r.generateModel,
 		"prompt": prompt,
 		"stream": true,
+		// qwen3 thinks by default, which roughly doubled answer time for no gain on
+		// grounded answers. Models without thinking ignore it
+		"think": false,
 		"options": map[string]any{
 			"num_ctx":     contextWindowFor(prompt),
 			"num_predict": maxAnswerTokens,
@@ -572,16 +603,16 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 		},
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	response, err := http.Post(r.ollamaBaseURL+"/api/generate", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("ollama returned %d: %s", response.StatusCode, strings.TrimSpace(string(raw)))
+		return "", fmt.Errorf("ollama returned %d: %s", response.StatusCode, strings.TrimSpace(string(raw)))
 	}
 
 	// The answer is streamed to the caller and accumulated at the same time. Streaming
@@ -603,7 +634,7 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 			fmt.Fprint(out, err)
 		}
 		if token.Error != "" {
-			return fmt.Errorf("ollama failed mid-answer: %s", token.Error)
+			return "", fmt.Errorf("ollama failed mid-answer: %s", token.Error)
 		}
 		fmt.Fprint(out, token.Response)
 		answer.WriteString(token.Response)
@@ -612,12 +643,9 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("reading the answer stream: %w", err)
+		return "", fmt.Errorf("reading the answer stream: %w", err)
 	}
-	fmt.Fprintln(out)
-
-	r.writeGroundingReport(out, answer.String(), chunks)
-	return nil
+	return answer.String(), nil
 }
 
 // writeGroundingReport checks the answer against the passages it was built from and
@@ -907,8 +935,10 @@ func buildPrompt(question string, chunks []store.Chunk, options queryOptions) st
 	builder.WriteString("1. Answer using ONLY the CONTEXT below. Do not use anything you know from training.\n")
 	builder.WriteString("2. Never invent titles, authors, dates, numbers, or sources. If it is not in the CONTEXT, it does not exist.\n")
 	builder.WriteString("3. If the CONTEXT does not answer the question, say exactly what the saved material DOES cover, then say the rest is not in their notes. Do not fill the gap from memory.\n")
-	builder.WriteString("4. Answer directly and concisely. Lead with the answer itself. Include the specific details that answer the question — numbers, names, settings — and leave out everything else.\n")
-	builder.WriteString("5. Do not restate the question, summarize the context, or add a closing offer to help.\n")
+	builder.WriteString("4. Lead with the answer itself, and make it complete. If the question asks for a list or for \"all\" of something, include every matching item in the CONTEXT, not just the first few.\n")
+	builder.WriteString("5. For each thing you name, give what the CONTEXT says about it: what it does, its syntax, options, and examples. Never answer with bare names or keywords. Do not add explanations or examples the CONTEXT does not contain.\n")
+	builder.WriteString("6. Stay on the question. A question about one thing gets an answer about that thing only, even if the CONTEXT covers more.\n")
+	builder.WriteString("7. Do not restate the question, summarize the context, or add a closing offer to help.\n")
 
 	if options.includeDate || options.includeSource {
 		var parts []string
@@ -918,7 +948,7 @@ func buildPrompt(question string, chunks []store.Chunk, options queryOptions) st
 		if options.includeDate {
 			parts = append(parts, "the date it was saved")
 		}
-		fmt.Fprintf(&builder, "6. When you use a passage, cite %s once in parentheses where you use it. Cite each document only once, not per sentence.\n", strings.Join(parts, " and "))
+		fmt.Fprintf(&builder, "8. When you use a passage, cite %s once in parentheses where you use it. Cite each document only once, not per sentence.\n", strings.Join(parts, " and "))
 	}
 
 	// A manifest of the documents the passages came from, stated once and up front.
@@ -947,7 +977,7 @@ func buildPrompt(question string, chunks []store.Chunk, options queryOptions) st
 	}
 
 	fmt.Fprintf(&builder, "QUESTION: %s\n\n", question)
-	builder.WriteString("Answer from the CONTEXT above only. If it is not there, say so rather than guessing.\nANSWER:")
+	builder.WriteString("Answer from the CONTEXT above only. If it is not there, say so rather than guessing. Cover every item the question asks about, each with the details and examples the CONTEXT gives for it, and nothing the question did not ask about.\nANSWER:")
 
 	return builder.String()
 }

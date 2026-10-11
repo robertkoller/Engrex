@@ -112,6 +112,20 @@ context, which is matched exactly — so two identical questions under different
 prompts cannot share an entry. That is a requirement the reference guide states explicitly,
 satisfied here without a special case.
 
+### Passage order is not part of the namespace
+
+Rewordings of one question usually retrieve the same passages but rank them differently,
+and `buildPrompt` writes them in rank order. Hashing the context as-is put "sql basics"
+and "give me the sql basics" in different namespaces even though their passages were
+byte-identical, so the second always missed with `similarity: 0` (an empty namespace,
+not a threshold miss). Most answer misses in the lookup log on 2026-10-11 were this.
+
+For the `engrex-answer` format, `canonicalAnswerContext` rewrites the context part before
+hashing: the document manifest lines and the passages are sorted and their `[n]`
+numbering dropped. The prompt sent to the model is unchanged. The guarantee still holds
+because every passage still has to match to the byte; only their order is ignored. A
+different set of passages, even one more or one fewer, is still a different namespace.
+
 ## How a lookup is decided
 
 `Cache.Lookup` tries three things, cheapest first, and stops at the first hit.
