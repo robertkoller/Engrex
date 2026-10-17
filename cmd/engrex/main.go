@@ -15,15 +15,17 @@ import (
 
 	"github.com/robertkoller/engrex/internal/daemon"
 	"github.com/robertkoller/engrex/internal/db"
+	"github.com/robertkoller/engrex/internal/protocol"
 	ragpkg "github.com/robertkoller/engrex/internal/rag"
 	"github.com/robertkoller/engrex/internal/store"
 	"github.com/spf13/cobra"
 )
 
 type socketCommand struct {
-	Type   string `json:"type"`
-	Text   string `json:"text"`
-	Source string `json:"source"`
+	Type    string          `json:"type"`
+	Text    string          `json:"text"`
+	Source  string          `json:"source"`
+	History []protocol.Turn `json:"history,omitempty"`
 }
 
 type socketResponse struct {
@@ -69,29 +71,8 @@ func sendCommand(command socketCommand) error {
 	}
 
 	if command.Type == "query" {
-		reader := bufio.NewReader(conn)
-
-		// First line is the JSON sources list; the rest is the answer stream.
-		sourcesLine, err := reader.ReadString('\n')
-		if err != nil {
-			return err
-		}
-		var sourcesPayload struct {
-			Sources []string `json:"sources"`
-		}
-		_ = json.Unmarshal([]byte(sourcesLine), &sourcesPayload)
-
-		if _, err := io.Copy(os.Stdout, reader); err != nil {
-			return err
-		}
-
-		if len(sourcesPayload.Sources) > 0 {
-			fmt.Println("\nSources:")
-			for _, source := range sourcesPayload.Sources {
-				fmt.Printf("  - %s\n", filepath.Base(source))
-			}
-		}
-		return nil
+		_, err := streamAnswer(conn)
+		return err
 	}
 
 	var response socketResponse
@@ -102,6 +83,35 @@ func sendCommand(command socketCommand) error {
 		return errors.New(response.Error)
 	}
 	return nil
+}
+
+// streamAnswer prints a query's answer as it arrives, then its sources, and returns the
+// answer text so a chat can send it back as history
+func streamAnswer(conn net.Conn) (string, error) {
+	reader := bufio.NewReader(conn)
+
+	// First line is the JSON sources list; the rest is the answer stream.
+	sourcesLine, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	var sourcesPayload struct {
+		Sources []string `json:"sources"`
+	}
+	_ = json.Unmarshal([]byte(sourcesLine), &sourcesPayload)
+
+	var answer strings.Builder
+	if _, err := io.Copy(io.MultiWriter(os.Stdout, &answer), reader); err != nil {
+		return answer.String(), err
+	}
+
+	if len(sourcesPayload.Sources) > 0 {
+		fmt.Println("\nSources:")
+		for _, source := range sourcesPayload.Sources {
+			fmt.Printf("  - %s\n", filepath.Base(source))
+		}
+	}
+	return answer.String(), nil
 }
 
 // Entry point for the engrex CLI.
@@ -324,6 +334,7 @@ func initializeCobra(rag *ragpkg.RAG, store *store.Store) *cobra.Command {
 
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(queryCmd)
+	rootCmd.AddCommand(chatCommand())
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(clearCmd)

@@ -39,6 +39,7 @@ const THEME = (function readTheme() {
 // date/recency meaning, just an on-brand spread of color.
 const themeInterpolator = d3.interpolateRgbBasis([THEME.c1, THEME.c2, THEME.c3]);
 const NODE_RADIUS = 7; // fixed — nodes are NOT scaled by connectivity
+const GRAVITY = 0.08; // pull toward the center, strong enough to keep loners in view
 
 function colorForNode(node) {
   const id = Number(node.id) || 0;
@@ -66,6 +67,7 @@ let linkGroup = null;
 let nodeGroup = null;
 let zoomBehavior = null;
 let simulation = null;
+let hasFitted = false; // the first layout is framed once, after that the view is the user's
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -101,9 +103,37 @@ function setupCanvas() {
     if (simulation) {
       const size = viewportSize();
       simulation.force("center", d3.forceCenter(size.width / 2, size.height / 2));
+      simulation.force("x", d3.forceX(size.width / 2).strength(GRAVITY));
+      simulation.force("y", d3.forceY(size.height / 2).strength(GRAVITY));
       simulation.alpha(0.2).restart();
     }
   });
+}
+
+// Frames every node once the first layout settles, without zooming in past 1.5x on a
+// small graph
+function zoomToFit() {
+  if (currentNodes.length === 0) {
+    return;
+  }
+  const xs = currentNodes.map(function (node) {
+    return node.x;
+  });
+  const ys = currentNodes.map(function (node) {
+    return node.y;
+  });
+  const padding = 60;
+  const minX = Math.min.apply(null, xs) - padding;
+  const maxX = Math.max.apply(null, xs) + padding;
+  const minY = Math.min.apply(null, ys) - padding;
+  const maxY = Math.max.apply(null, ys) + padding;
+  const size = viewportSize();
+  const scale = Math.min(1.5, size.width / (maxX - minX), size.height / (maxY - minY));
+  const transform = d3.zoomIdentity
+    .translate(size.width / 2, size.height / 2)
+    .scale(scale)
+    .translate(-(minX + maxX) / 2, -(minY + maxY) / 2);
+  svg.transition().duration(500).call(zoomBehavior.transform, transform);
 }
 
 function viewportSize() {
@@ -271,8 +301,13 @@ function render(nodes, edges) {
           return 0.05 + similarity(link.distance) * 0.5;
         })
     )
-    .force("charge", d3.forceManyBody().strength(-280))
+    // distanceMax keeps repulsion local. Unlimited, it pushed documents with no edges
+    // off toward the edges of the canvas where they were hard to find
+    .force("charge", d3.forceManyBody().strength(-220).distanceMax(260))
     .force("center", d3.forceCenter(size.width / 2, size.height / 2))
+    // A weak pull toward the middle so unconnected documents stay near the rest
+    .force("x", d3.forceX(size.width / 2).strength(GRAVITY))
+    .force("y", d3.forceY(size.height / 2).strength(GRAVITY))
     .force(
       "collide",
       d3.forceCollide().radius(NODE_RADIUS + 6)
@@ -296,6 +331,12 @@ function render(nodes, edges) {
       });
     });
 
+  simulation.on("end", function () {
+    if (!hasFitted) {
+      hasFitted = true;
+      zoomToFit();
+    }
+  });
   simulation.alpha(1).restart();
 
   // Reapply any active selection/search/hover styling to the new selections.

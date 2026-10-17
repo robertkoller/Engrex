@@ -48,6 +48,10 @@ Engrex is not one program — it's a long-running **daemon** plus a set of thin
   same API as Ollama, so pointing Engrex at it is a change of one config value
   (`ollama_url`, or `ENGREX_OLLAMA_URL`). It serves requests it has already answered and
   forwards the rest. See [caching.md](caching.md).
+- **Gemini** — optional, off unless a key is in `.env` and the app's Use Gemini toggle
+  (or a `gemini-*` model name) is chosen. Only answer generation moves to Google's API.
+  The question's retrieved passages are sent with it, and embedding, retrieval and
+  storage stay local. See [rag-pipeline.md](rag-pipeline.md#gemini-optional-cloud-answers).
 
 ## Why a daemon?
 
@@ -92,8 +96,15 @@ Take `engrex query "how does X work?"`:
 5. The daemon sends the list of **source files** back as the first line of the
    response, then builds a RAG prompt (grounding rules, a document manifest, the
    retrieved passages, the question) and streams the LLM's answer token-by-token over
-   the same connection, with the context window sized to the prompt.
+   the same connection, with the context window sized to the prompt. The answer comes
+   from Ollama, or from Gemini when the query names a `gemini-` model.
 6. The client renders the streaming answer and the clickable sources.
+
+A chat follow-up is the same request with the earlier turns attached as `history`. The
+client keeps the conversation and the daemon stays stateless. Before step 3 the daemon
+condenses the follow-up into a standalone question with the local model and searches
+both versions, and the prompt gains a conversation section. See
+[rag-pipeline.md](rag-pipeline.md#conversations).
 
 Three optional stages can wrap this — query rewriting before retrieval, reranking
 after it, and citation verification after generation. All are off by default; see

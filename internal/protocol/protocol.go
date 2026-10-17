@@ -56,6 +56,21 @@ type Command struct {
 	// daemon's configured default. Lets a client offer a per-question choice between a
 	// fast model and a more capable one without restarting the daemon.
 	Model string `json:"model,omitempty"`
+
+	// History is the conversation before this query, oldest first. The client owns it,
+	// so the daemon stays stateless and an empty history is a plain one-off query
+	History []Turn `json:"history,omitempty"`
+}
+
+const (
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
+)
+
+// Turn is one message of a conversation
+type Turn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 type Response struct {

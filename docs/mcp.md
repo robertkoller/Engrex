@@ -133,7 +133,9 @@ visualization at `localhost:7778`. Each node reports its hop distance from the r
 edges carry both the stored cosine `distance` and `similarity` (`1 - distance`).
 
 A document with no edges returns just itself, which is correct rather than an error: it
-means nothing else stored is close enough to have crossed the edge threshold.
+means nothing else stored is close enough to have crossed the edge threshold, or that
+it shares only one weak chunk pair with any other document (see
+[data-model.md](data-model.md#relations--the-knowledge-graph-edges)).
 
 ---
 

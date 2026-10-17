@@ -134,7 +134,12 @@ class QueryWindow: NSPanel {
             let topEdge = newFrame.origin.y + newFrame.height
             let centerX = newFrame.origin.x + newFrame.width / 2
             newFrame.size = size
-            newFrame.origin.y = topEdge - size.height
+
+            // A long chat grows down, so stop it at the bottom of the screen
+            if let visibleFrame = (self.screen ?? NSScreen.main)?.visibleFrame {
+                newFrame.size.height = min(size.height, topEdge - visibleFrame.minY)
+            }
+            newFrame.origin.y = topEdge - newFrame.size.height
             newFrame.origin.x = centerX - size.width / 2
             self.setFrame(newFrame, display: true)
         }

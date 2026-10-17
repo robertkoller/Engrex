@@ -1,0 +1,76 @@
+{
+  "_comment": [
+    "Follow-up golden set for `engrex eval --set eval/conversations.json`. Each case is the next",
+    "message in a conversation: 'history' is what came before, 'question' is the follow-up as a user",
+    "would actually type it, and 'relevant' is what that follow-up needs. Kept separate from",
+    "golden.json so its numbers stay comparable to earlier baselines.",
+    "",
+    "Run it twice, once with --raw-followups (search the follow-up verbatim) and once without",
+    "(condense it first, as chat does). The follow-up slice is the comparison that matters.",
+    "",
+    "Like golden.json these are STARTER cases over this repo's docs/. Replace them with follow-ups",
+    "you actually ask, especially ones where the follow-up shares no words with what it needs."
+  ],
+  "cases": [
+    {
+      "history": [
+        {"role": "user", "content": "what file formats can engrex ingest?"},
+        {"role": "assistant", "content": "Engrex ingests plain text, markdown, PDF, DOCX, PPTX, HTML, and common code and data files dropped into ~/Engrex."}
+      ],
+      "question": "how does it handle the slides one?",
+      "relevant": ["ingestion.md"],
+      "note": "Reference resolution: 'the slides one' means PPTX. Nothing retrievable in the raw follow-up."
+    },
+    {
+      "history": [
+        {"role": "user", "content": "what are the MCP tools?"},
+        {"role": "assistant", "content": "There are three read-only tools: search_notes, get_document, and query_knowledge_graph."}
+      ],
+      "question": "what does the first one return?",
+      "relevant": ["mcp.md"],
+      "note": "Ordinal reference to search_notes."
+    },
+    {
+      "history": [
+        {"role": "user", "content": "which listeners does the daemon run?"},
+        {"role": "assistant", "content": "The daemon runs a Unix socket, an HTTP server, a graph server, and a file watcher."}
+      ],
+      "question": "and what's the second one for?",
+      "relevant": ["daemon.md"],
+      "note": "Ordinal reference to the HTTP server."
+    },
+    {
+      "history": [
+        {"role": "user", "content": "how does hybrid search combine vector and keyword results?"},
+        {"role": "assistant", "content": "It fuses the vector ranking and the BM25 keyword ranking with Reciprocal Rank Fusion."}
+      ],
+      "question": "why does the keyword half drop some words?",
+      "relevant": ["rag-pipeline.md"],
+      "note": "Topic shift within the same document: stopword removal. Has some retrievable words on its own."
+    },
+    {
+      "history": [
+        {"role": "user", "content": "how fast is the HNSW index compared to brute force?"},
+        {"role": "assistant", "content": "It is faster at larger corpus sizes, but recall depends on efSearch."}
+      ],
+      "question": "what happens to recall as the corpus grows?",
+      "relevant": ["hnsw.md"],
+      "note": "Implicit subject: 'the corpus' only means the HNSW benchmark in context."
+    },
+    {
+      "history": [
+        {"role": "user", "content": "what happens when I edit and re-save a file that was already ingested?"},
+        {"role": "assistant", "content": "Unchanged content is skipped by its hash; changed content has its old chunks deleted and is re-ingested."}
+      ],
+      "question": "can that ever create two copies of it?",
+      "relevant": ["ingestion.md"],
+      "note": "Points at the identity trap section. 'that' and 'it' carry the whole subject."
+    },
+    {
+      "history": [],
+      "question": "what does search_notes return?",
+      "relevant": ["mcp.md"],
+      "note": "Standalone control: the condensed and raw runs should score identically here."
+    }
+  ]
+}

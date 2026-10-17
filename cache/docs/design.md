@@ -86,6 +86,7 @@ opening line plus the delimiters that wrap the caller's input:
 | `engrex-rerank` | `rerank.buildPrompt` | `\nQUESTION: ` and `\n\nPASSAGES:\n` |
 | `engrex-verify` | `verify.checkClaim` | `\nSTATEMENT: ` and `\n\nIf a passage states` |
 | `engrex-rewrite` | `rewrite.buildPrompt` | `\nQUESTION: ` and `\nLOOKUPS:` |
+| `engrex-condense` | `rewrite.buildCondensePrompt` | `\nLATEST MESSAGE: ` and `\nSTANDALONE QUESTION:` |
 
 Two details in `marker.apply` are load-bearing:
 

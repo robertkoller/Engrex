@@ -97,6 +97,15 @@ var markers = []marker{
 		start:  "\nQUESTION: ",
 		end:    "\nLOOKUPS:",
 	},
+	{
+		// internal/rewrite.buildCondensePrompt. The conversation lands in the context, so
+		// the same follow-up after two different conversations never shares an entry
+		name:   "engrex-condense",
+		class:  ClassRewrite,
+		prefix: "Rewrite the user's latest message as a standalone search question.",
+		start:  "\nLATEST MESSAGE: ",
+		end:    "\nSTANDALONE QUESTION:",
+	},
 }
 
 // EngrexSplitter recognizes the prompt formats this project builds.

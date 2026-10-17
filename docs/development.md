@@ -41,6 +41,35 @@ they don't trigger a sudo prompt for no reason.
 ⚠️ Installing is still not enough on its own: a running process keeps executing the
 binary it started with. **Restart the daemon after every install.**
 
+## Start, status and stop scripts
+
+`scripts/start.sh`, `scripts/status.sh` and `scripts/stop.sh` manage everything as
+plain background processes rather than launchd agents, with shared helpers in
+`scripts/common.sh`.
+
+`start.sh` runs `make compile cache` and only runs `make install` (the sudo step) when
+`cmp` says the built binaries differ from `/usr/local/bin`. Then it runs
+`make app-install` and brings things up in dependency order: Ollama, the cache
+(plain `engrex-cache serve`, strict matching; set `ENGREX_CACHE_FLAGS=--tolerant` to
+opt in), `engrex-cache enable` if the
+config doesn't already point at the proxy, the daemon, and the app. Anything already running
+is restarted if it started before its binary was last written (or, for the daemon,
+before `~/.engrex/config.json` was), so whatever runs after `start.sh` is always the
+installed code. That holds with `--no-build` too, so a manual `make install` gets picked
+up. Nothing that is already current gets restarted. Each step waits for a real answer (`/api/tags`,
+`/api/stats`, a `models` request on the socket), not just for a PID. `--no-build` skips
+the builds.
+
+`stop.sh` finds processes by command line (`ollama serve`, `engrex-cache serve`,
+`engrex daemon`) and so stops them however they were started, including a foreground
+`engrex daemon` in another terminal. Each gets TERM, then KILL after 10 seconds.
+`--keep-ollama` leaves Ollama up. Both scripts unload the launchd agents first if
+they're loaded, since `KeepAlive` would respawn anything they kill. The scripts and the
+`make stack-*` targets are alternatives, so don't mix them.
+
+Go stamps the git revision into the binary, so after a commit `start.sh` will see a
+difference and reinstall even if no code changed.
+
 ## Running the cache alongside the daemon
 
 `make stack-start` brings the whole thing up in order: it writes the cache's launchd
@@ -233,8 +262,9 @@ docs/                  you are here
 | Command | What it does |
 |---|---|
 | `add` / `query` / `list` / `delete` / `clear` | Core operations, over the daemon socket |
+| `chat` | Multi-turn questions over the socket; `/new` starts over, `/exit` quits. History lives only in the process |
 | `ask` | Query **in-process** with opt-in stages (`--rerank`, `--rewrite`, `--verify`, `--all`, `--model`, `--top-k`) |
-| `eval` | Score retrieval against the golden set (`--rerank`, `--rewrite`, `--save`) |
+| `eval` | Score retrieval against the golden set (`--rerank`, `--rewrite`, `--raw-followups`, `--save`) |
 | `bench-hnsw` | Benchmark the HNSW index against exact search |
 | `doctor` | Embedding magnitude, schema version, chunk/vector counts |
 | `reindex` | Re-embed every chunk and rebuild graph edges |

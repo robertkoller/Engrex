@@ -57,8 +57,11 @@ class SocketClient {
     // model is sent per query and may be empty, in which case the daemon uses its
     // configured default. Sending it per query rather than configuring the daemon is
     // what lets the toolbar toggle take effect on the next question with no restart.
+    // history is the conversation before this question, oldest first. The daemon keeps
+    // no sessions, so it's resent in full every turn
     func sendQuery(
         text: String,
+        history: [ChatMessage] = [],
         model: String = "",
         onSources: @escaping ([String]) -> Void,
         onToken: @escaping (String) -> Void,
@@ -71,9 +74,12 @@ class SocketClient {
             }
             defer { close(fileDescriptor) }
 
-            var command = ["type": "query", "text": text]
+            var command: [String: Any] = ["type": "query", "text": text]
             if !model.isEmpty {
                 command["model"] = model
+            }
+            if !history.isEmpty {
+                command["history"] = history.map { ["role": $0.role.rawValue, "content": $0.text] }
             }
             guard let payload = self.encode(command) else {
                 DispatchQueue.main.async { onComplete(SocketError.encodingFailed) }
@@ -196,7 +202,7 @@ class SocketClient {
         }
     }
 
-    private func encode(_ command: [String: String]) -> Data? {
+    private func encode(_ command: [String: Any]) -> Data? {
         guard var data = try? JSONSerialization.data(withJSONObject: command) else { return nil }
         data.append(0x0A) // newline
         return data

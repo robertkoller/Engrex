@@ -110,6 +110,15 @@ knowledge graph. Deleting chunks (via `Delete` or `DeleteBySource`) also removes
 edges that touch them, so the table never keeps rows pointing at ids that no longer
 exist.
 
+Two documents get an edge only when at least `minDocumentLinks` (2) chunk pairs link
+them, or a single pair is closer than `strongLinkDistance` (0.25). The edge's distance
+is the closest pair's (`store.GraphData`, `internal/store/store.go`). One pair alone was
+often a coincidence: in the live corpus a numpy page and SQL slides were linked by one
+pair of "filtering" passages at 0.316, while related documents were linked by 5 to 7
+pairs. A tighter threshold couldn't separate them, since genuine single pairs reached
+0.3145. The single strong-pair exception lets one-chunk notes still connect. These two
+values were tuned on three document pairs, so treat them as provisional.
+
 Edges are recorded **once, at insert time** — nothing recomputes similarity on read.
 Both the web UI's graph and the MCP `query_knowledge_graph` tool read this table through
 `store.GraphData`, so they cannot disagree about what is connected to what.

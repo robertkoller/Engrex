@@ -125,8 +125,13 @@ func buildPrompt(question string) string {
 }
 
 func (rewriter *LLMRewriter) generate(prompt string) (string, error) {
+	return complete(rewriter.BaseURL, rewriter.Model, rewriter.Timeout, prompt)
+}
+
+// complete runs one non-streaming generation against Ollama
+func complete(baseURL, model string, timeout time.Duration, prompt string) (string, error) {
 	body, err := json.Marshal(map[string]any{
-		"model":  rewriter.Model,
+		"model":  model,
 		"prompt": prompt,
 		"stream": false,
 		"think":  false,
@@ -141,8 +146,8 @@ func (rewriter *LLMRewriter) generate(prompt string) (string, error) {
 		return "", err
 	}
 
-	client := &http.Client{Timeout: rewriter.Timeout}
-	response, err := client.Post(rewriter.BaseURL+"/api/generate", "application/json", bytes.NewReader(body))
+	client := &http.Client{Timeout: timeout}
+	response, err := client.Post(baseURL+"/api/generate", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}

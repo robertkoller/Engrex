@@ -34,22 +34,28 @@ around this core and are documented separately in
 5. **Stub** — for non-file sources, a `.txt` copy is written to `~/Engrex/RawText/`
    so you can browse what you saved (see [ingestion.md](ingestion.md)).
 
-## Query path: `rag.Query(out, question, maxDistance, topK)`
+## Query path: `rag.Converse(out, history, question, maxDistance, topK)`
+
+`rag.Query` is `Converse` with no history. A query with history is a chat follow-up,
+covered in [Conversations](#conversations).
 
 1. **Parse flags** — `parseQueryFlags` pulls `--date` / `--source` out of the question
    so they don't pollute the embedding, and records them as options.
-2. **Retrieve** — hand off to [`rag.Retrieve`](#retrieval-path), which returns the
-   fused (and optionally reranked) chunk list.
+2. **Retrieve** — hand off to `rag.RetrieveConversation`, which is plain
+   [`rag.Retrieve`](#retrieval-path) when there's no history. It returns the fused (and
+   optionally reranked) chunk list.
 3. **Emit sources first** — the daemon writes `{"sources":[...]}` as the first line of
    the response, then the answer. See [the wire protocol](#query-wire-protocol).
 4. **Build the prompt** — `buildPrompt` assembles grounding rules, a document manifest,
    the retrieved passages, and the question (see [Prompting](#prompting)). If nothing
    relevant was found, `buildNoContextPrompt` asks the model to answer from general
    knowledge and label it `[outside knowledge]:`.
-5. **Stream** — the prompt goes to `/api/generate` with `"stream": true`, `temperature`
-   pinned to 0, and an explicitly sized `num_ctx` (see
-   [Context sizing](#context-sizing-num_ctx)). Tokens are written to `out` as they
-   arrive, and accumulated so verification can see the finished answer.
+5. **Stream** — `generate` picks the backend by model name. Names starting with
+   `gemini-` go to Google (see [Gemini](#gemini-optional-cloud-answers)). Everything else
+   goes to Ollama's `/api/generate` with `"stream": true`, `"think": false`,
+   `temperature` pinned to 0, and an explicitly sized `num_ctx` (see
+   [Context sizing](#context-sizing-num_ctx)). Either way, tokens are written to `out` as
+   they arrive and accumulated so verification can see the finished answer.
 
    The endpoint is whatever `ollama_url` resolves to — Ollama directly, or the semantic
    cache in front of it ([caching.md](caching.md)). Temperature is pinned so the same
@@ -68,6 +74,9 @@ around this core and are documented separately in
 The newline after the JSON is the delimiter. Clients read the first line as sources,
 then treat the rest as the streaming answer. The CLI and the Swift `SocketClient` both
 implement this split.
+
+The response is the same for a follow-up. Only the request differs: it carries
+`"history": [{"role": "user" | "assistant", "content": "..."}, …]`, oldest first.
 
 This applies to `query` only. The read-only `search`/`document`/`graph` commands used
 by MCP reply with a single JSON object and no stream — see
@@ -102,6 +111,50 @@ is no second implementation to drift.
 
 Each returned chunk carries its RRF `Score` alongside its vector `Distance`; `Distance`
 is `0` for chunks only the keyword search found.
+
+## Conversations
+
+Chat follow-ups ("what does the import one do?") go through the same pipeline. The
+**client owns the conversation** and sends the earlier turns with each `query` as
+`history`, so the daemon keeps no chat state and nothing survives a restart. The CLI's
+`engrex chat` and the Swift app both work this way.
+
+1. **Trim the history** (`trimHistory`). Unknown roles and empty turns are dropped.
+   Past answers lose the "[No relevant notes found…]" notice and the grounding report,
+   since a model that sees those starts writing its own. Past questions lose their
+   `--date`/`--source` flags. Each message is capped at `maxHistoryMessageChars` (2000)
+   and only the last `maxHistoryMessages` (6, three exchanges) are kept, since history is
+   what grows the prompt and `num_ctx` with it.
+2. **Condense** (`rewrite.Condenser`). A follow-up searched verbatim retrieves almost
+   nothing, so the default local model rewrites it into a standalone question from the
+   last 4 messages (600 characters each). Any failure, an empty reply, or a reply over
+   300 characters (the model answered instead of rewriting) falls back to the raw
+   follow-up. The condenser always uses the local default model, even when the answer
+   goes to the deep model or Gemini.
+3. **Retrieve both.** `RetrieveConversation` searches the standalone question **and**
+   the raw follow-up and fuses them, so condensing can only add candidates. This matters:
+   qwen3:4b rewrote "what does the import one do exactly?" as a question about `.mode`
+   despite a rule against swapping names, and the raw follow-up's keywords are what
+   still found the `.import` passage. Reranking judges against the standalone version.
+   Passages are fetched fresh every turn, since a follow-up often moves to something
+   the first turn's passages never covered.
+4. **Prompt.** `writeConversation` puts a `CONVERSATION SO FAR` section ahead of the
+   manifest and passages, so the question and the repeated rules stay at the end. Its
+   header says facts come only from the CONTEXT, and that the question may ask about
+   something earlier answers never mentioned. Without that line qwen3:4b said `.import`
+   "does not exist" with the passage at rank 1. With history, the closing rule adds
+   "never repeat an earlier answer", because the model otherwise copied its previous
+   answer. The no-context prompt gets the same conversation section.
+
+History stays in the single `/api/generate` prompt rather than moving to `/api/chat`.
+That way the semantic cache treats the conversation as part of the exact-match context
+(different conversations never share an answer) and Gemini needed no change.
+
+The three prompt fixes above came from one live three-turn chat with qwen3:4b
+(2026-10-12), not from the eval harness. The condenser still swaps `.import` for `.mode`
+in that chat; the answer is right because of step 3.
+`eval/conversations.json` and `engrex eval --raw-followups` exist to measure condensing,
+but its starter cases ask about these docs, and they haven't been run.
 
 ### Why keyword search drops stopwords
 
@@ -212,6 +265,15 @@ vectors, and the guarantee is what keeps the distance thresholds meaningful.
    long prompt far more heavily than the beginning, so an instruction given only up
    front is effectively gone by generation time.
 
+The answer rules ask for **completeness, but only from the context**. A list question
+gets every matching item, and each named thing gets what the context says about it:
+what it does, its syntax, examples. Nothing the context doesn't contain gets added, and
+the answer stays on the question. The previous rule ("answer directly and concisely…
+leave out everything else") made llama3.2 and qwen3:8b answer "what are the `.`
+commands" with bare names, even though the descriptions were in the passages. A
+first attempt at "explain each thing" made llama3.2 pad answers with explanations the
+notes didn't contain, which is why the final wording ties every detail to the context.
+
 The previous prompt told the model to "supplement with your own knowledge" whenever the
 notes fell short, prefixing outside claims with `[outside knowledge]:`. A 3B model reads
 that as permission to answer from priors and then ignores the labelling rule, because
@@ -247,9 +309,12 @@ produced 52 tokens while `qwen3:4b` produced 977 — the latter taking 53s uncap
 versus 14s capped at 250. The cap is what keeps worst-case latency bounded when the
 generation model changes underneath.
 
-Prompt rule 4 also asks for a direct, concise answer. An earlier version asked the
-model to be "specific and thorough… rather than summarizing it away", which was
-directly buying those 977-token answers.
+The rules ask for complete answers drawn only from the context (see
+[Prompting](#prompting)). That made answers about twice as long: median latency on six
+llama3.2 questions went from 10.6s to 19.7s. The 400-token cap still bounds the worst
+case. A much older prompt asked the model to be "specific and thorough… rather than
+summarizing it away" with no tie to the context, and that is what bought the 977-token
+answers above.
 
 ## Prompt caching
 
@@ -269,7 +334,8 @@ corpus where most questions pull the same chunks, that covers a lot of queries.
 ## Models
 
 - **Embeddings:** `nomic-embed-text` (768 dims).
-- **Generation:** configurable, default `llama3.2`.
+- **Generation:** configurable, default `llama3.2`. The menu bar's Deep thinking toggle
+  uses `deep_model` (default `qwen3:8b`), and Use Gemini uses `gemini_model`.
 
 Generation model resolution, in precedence order:
 
@@ -289,6 +355,33 @@ question and corpus:
 | `llama3.2:3b` | 3.2 GB | ❌ invents papers instead |
 | `qwen3:4b` | 4.0 GB | ✅ |
 | `qwen3:8b` | 6.4 GB | ✅ (but no better than 4b, and slower) |
+
+That table predates `"think": false`. With thinking off (2026-10-11, one run each on the
+same retrieved prompt), qwen3:8b answered "which join types does sqlite not support" and
+"WHERE vs HAVING" correctly in ~22–25s. llama3.2 got the first wrong (it said inner
+join is unsupported, against its own context). qwen3:4b ignores `think: false` and writes
+its reasoning into the answer, often running out of tokens before it answers. That is
+why `deep_model` moved from qwen3:4b to qwen3:8b.
+
+## Gemini (optional cloud answers)
+
+Any model name starting with `gemini-` is answered by Google's
+`models/{model}:streamGenerateContent?alt=sse` (`internal/gemini`). Only the answer
+step moves. Embedding, retrieval and ingestion stay local, but **the prompt, including
+the retrieved passages, is sent to Google**. Every cloud answer is logged by the daemon.
+
+- The prompt is the same `buildPrompt` output, sent as one user message.
+- The key goes in the `x-goog-api-key` header, never in the URL. How it's found is
+  covered in [development.md](development.md#gemini-optional-cloud).
+- `maxOutputTokens` is 4096, not 400, because Gemini counts its thinking against the
+  same limit. `thinkingConfig.thinkingLevel` is `"low"`.
+- Parts flagged `thought: true` are dropped. A `promptFeedback.blockReason` or a
+  mid-stream error fails the query, and any finish reason other than `STOP` (e.g.
+  `MAX_TOKENS`) is written into the answer as `[Gemini stopped early: …]`.
+- The semantic cache only speaks Ollama's protocol, so Gemini calls are never cached.
+
+Gemini answers in Markdown (headings, nested bullets, code fences), which the app
+renders. See [ui.md](ui.md#the-query-window).
 
 Cold start (loading a model into RAM) costs ~1 second against a ~90 second query, so
 it is not worth optimizing. Generation speed is.

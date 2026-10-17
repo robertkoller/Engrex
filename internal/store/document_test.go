@@ -2,6 +2,8 @@ package store
 
 import (
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -188,5 +190,79 @@ func TestGraphNeighborhoodTrimsByDepth(t *testing.T) {
 
 	if _, _, err := chunkStore.GraphNeighborhood("/tmp/missing.md", 1); !errors.Is(err, ErrDocumentNotFound) {
 		t.Errorf("neighborhood of unknown document = %v, want ErrDocumentNotFound", err)
+	}
+}
+
+// One coincidental chunk pair shouldn't link two documents, but a strong pair or
+// several weaker ones should
+func TestGraphDataNeedsMoreThanOneWeakLink(t *testing.T) {
+	chunkStore := newTestStore(t)
+
+	sources := []string{"/tmp/sql.md", "/tmp/numpy.md", "/tmp/note.md", "/tmp/demo.py"}
+	for index, source := range sources {
+		for part := 0; part < 2; part++ {
+			text := fmt.Sprintf("body %s part %d", source, part)
+			if err := chunkStore.InsertDocumentChunk(text, source, "", testVector(float32(index*2+part)*0.5), Metadata{}); err != nil {
+				t.Fatalf("insert %s: %v", source, err)
+			}
+		}
+	}
+	chunksBySource := map[string][]int64{}
+	rows, err := chunkStore.db.Query(`SELECT id, source FROM chunks ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id int64
+		var source string
+		if err := rows.Scan(&id, &source); err != nil {
+			t.Fatal(err)
+		}
+		chunksBySource[source] = append(chunksBySource[source], id)
+	}
+	rows.Close()
+
+	if _, err := chunkStore.db.Exec(`DELETE FROM relations`); err != nil {
+		t.Fatal(err)
+	}
+	link := func(from, to int64, distance float64) {
+		t.Helper()
+		if _, err := chunkStore.db.Exec(`INSERT INTO relations(source_id, target_id, distance) VALUES (?, ?, ?)`, from, to, distance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One weak pair: the coincidence that should be dropped
+	link(chunksBySource["/tmp/sql.md"][0], chunksBySource["/tmp/numpy.md"][0], 0.31)
+	// Two weak pairs: kept
+	link(chunksBySource["/tmp/numpy.md"][0], chunksBySource["/tmp/demo.py"][0], 0.3)
+	link(chunksBySource["/tmp/numpy.md"][1], chunksBySource["/tmp/demo.py"][1], 0.3)
+	// One strong pair: kept
+	link(chunksBySource["/tmp/note.md"][0], chunksBySource["/tmp/sql.md"][1], 0.2)
+
+	graph, err := chunkStore.GraphData()
+	if err != nil {
+		t.Fatalf("GraphData: %v", err)
+	}
+	keyByID := map[int64]string{}
+	for _, node := range graph.Nodes {
+		keyByID[node.ID] = node.Key
+	}
+	got := map[string]bool{}
+	for _, edge := range graph.Edges {
+		pair := []string{keyByID[edge.Source], keyByID[edge.Target]}
+		sort.Strings(pair)
+		got[pair[0]+" - "+pair[1]] = true
+	}
+	want := map[string]bool{
+		"/tmp/demo.py - /tmp/numpy.md": true,
+		"/tmp/note.md - /tmp/sql.md":   true,
+	}
+	if len(got) != len(want) {
+		t.Errorf("edges = %v, want %v", got, want)
+	}
+	for pair := range want {
+		if !got[pair] {
+			t.Errorf("missing edge %s (got %v)", pair, got)
+		}
 	}
 }

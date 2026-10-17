@@ -16,7 +16,9 @@ SQLite database (via `sqlite-vec`). Later, open the query window with ⌘⇧Spac
 `engrex query`), ask a natural-language question, and Engrex retrieves your most
 relevant chunks — fusing semantic (vector) and keyword (BM25) search with Reciprocal
 Rank Fusion — and answers with a local LLM, entirely on-device. Answers come with
-clickable **sources** so you can jump back to the original file or page.
+clickable **sources** so you can jump back to the original file or page. You can keep
+asking **follow-ups** in the same window (or `engrex chat`). Each one searches your
+notes again, and conversations are never saved.
 
 Three optional stages can wrap that core: **query rewriting** before retrieval,
 **LLM reranking** after it, and **citation verification** after generation. All are
@@ -76,18 +78,19 @@ engrex/
 │   ├── embedder/         # Ollama /api/embed — task prefixes + unit normalization
 │   ├── store/            # Insert, hybrid vector+BM25 search, graph edges, re-ingestion, delete
 │   ├── rag/              # Wires it all together; rank fusion, prompts, context sizing
-│   ├── ingest/           # Text extraction (md/txt/html/pdf/docx + code/config) + socket↔watcher hand-off
+│   ├── ingest/           # Text extraction (md/txt/html/pdf/docx/pptx + code/config) + socket↔watcher hand-off
 │   ├── eval/             # Golden set, recall@k / MRR scoring, baselines
 │   ├── hnsw/             # From-scratch HNSW approximate nearest-neighbor index + benchmark
 │   ├── rerank/           # Reranker interface + listwise LLM implementation
-│   ├── rewrite/          # Query decomposition and expansion
+│   ├── rewrite/          # Query decomposition and expansion; chat follow-up condensing
 │   ├── verify/           # Claim extraction + entailment checking against passages
 │   ├── watcher/          # fsnotify watcher on ~/Engrex/
 │   ├── socket/           # Unix socket server (CLI + Swift app) + read-only MCP commands
-│   ├── httpserver/       # localhost HTTP endpoint (browser extension)
+│   ├── httpserver/       # localhost HTTP endpoint (browser extension: page text, Google exports, Drive files)
+│   ├── gemini/           # Optional cloud answers via Google's Gemini API (off by default)
 │   ├── mcpserver/        # MCP stdio server — read-only tools bridged to the daemon
 │   ├── protocol/         # Socket wire types + error codes shared by daemon and clients
-│   ├── config/           # ~/.engrex/config.json (MCP toggle + generation model)
+│   ├── config/           # ~/.engrex/config.json (MCP toggle + models) and the .env key loader
 │   └── daemon/           # Ties the three listeners together
 ├── cache/                # Semantic caching proxy (own binary, no CGO) — see docs/caching.md
 ├── eval/                 # golden.json (question set) + baseline.json (committed numbers)
@@ -194,6 +197,21 @@ go mod download
 
 ## Running
 
+### Quick start
+
+Three scripts run the whole thing (Ollama, the cache, the daemon and the menu bar app)
+in the background, with logs in `~/.engrex/`:
+
+```bash
+scripts/start.sh             # build, install if changed (sudo), start everything in order
+scripts/start.sh --no-build  # start with what's already installed
+scripts/status.sh            # what's up, loaded models, cache hits, Gemini on/off
+scripts/stop.sh              # stop the app, daemon, cache and Ollama
+scripts/stop.sh --keep-ollama
+```
+
+The steps below do the same by hand.
+
 ### 1. Start Ollama
 
 Ollama must be running before anything else starts — the daemon pings its configured
@@ -242,6 +260,9 @@ engrex query "how does Go handle concurrency?"
 
 # Add date/source citations to the answer
 engrex query "how does Go handle concurrency? --source --date"
+
+# Ask follow-ups in one conversation (/new starts over, /exit quits)
+engrex chat
 
 # Drop files into ~/Engrex/ to ingest them
 # (.md .txt .html .pdf .docx .pptx, plus common code/config files like .go .py .json .csv)

@@ -10,21 +10,25 @@ struct QueryView: View {
     @AppStorage(Themes.storageKey) private var themeIndex: Int = 0
 
     @State private var queryText: String = ""
-    @State private var answer: String = ""
-    @State private var isStreaming: Bool = false
-    @State private var hasSubmitted: Bool = false
+    @State private var followUpText: String = ""
+    @State private var messages: [ChatMessage] = []
+    @State private var streamingMessageID: UUID?
+    @State private var lastActivity = Date()
     @State private var isUploadMode: Bool = false
     @State private var isGraphMode: Bool = false
     @State private var isDropTargeted: Bool = false
     @State private var tags: [String] = []
-    @State private var sources: [String] = []
     @FocusState private var isFieldFocused: Bool
+    @FocusState private var isFollowUpFocused: Bool
 
     private let socketClient = SocketClient()
 
     private let compactSize = CGSize(width: 660, height: 92)
-    private let expandedSize = CGSize(width: 660, height: 480)
-    private let expandedWithSourcesSize = CGSize(width: 880, height: 480)
+    // The window grows down by followUpGrowth for each follow-up, up to maxChatHeight
+    private let chatWidth: CGFloat = 660
+    private let firstAnswerHeight: CGFloat = 540
+    private let followUpGrowth: CGFloat = 140
+    private let maxChatHeight: CGFloat = 820
     private let uploadSize = CGSize(width: 640, height: 560)
     private let graphSize = CGSize(width: 940, height: 660)
 
@@ -34,13 +38,29 @@ struct QueryView: View {
         ("--source", "source")
     ]
 
+    // A conversation left alone this long is dropped on the next reopen, so the window
+    // doesn't come back to a stale chat. Nothing is saved across restarts either way
+    private let idleResetInterval: TimeInterval = 30 * 60
+
     private var theme: Theme { Themes.theme(for: themeIndex) }
+
+    private var isChatting: Bool { !messages.isEmpty }
+
+    private var isStreaming: Bool { streamingMessageID != nil }
+
+    private var chatSize: CGSize {
+        let followUps = max(0, messages.filter { $0.role == .user }.count - 1)
+        let height = min(maxChatHeight, firstAnswerHeight + CGFloat(followUps) * followUpGrowth)
+        return CGSize(width: chatWidth, height: height)
+    }
 
     var body: some View {
         ZStack {
             background
 
             VStack(alignment: .leading, spacing: 14) {
+                // The search bar keeps the question that started the conversation, and
+                // follow-ups are typed in the composer under the answers
                 searchBar
 
                 if isUploadMode {
@@ -51,19 +71,21 @@ struct QueryView: View {
                     graphView
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .transition(.opacity.combined(with: .move(edge: .top)))
-                } else if hasSubmitted {
-                    answerArea
+                } else if isChatting {
+                    ChatTranscript(messages: messages, streamingMessageID: streamingMessageID, theme: theme)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .transition(.asymmetric(
                             insertion: .move(edge: .top).combined(with: .opacity),
                             removal: .opacity
                         ))
+                    composer
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .padding(18)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: hasSubmitted)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isChatting)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isUploadMode)
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isGraphMode)
         .onAppear {
@@ -73,6 +95,9 @@ struct QueryView: View {
         // which means onAppear fires only once. This is what refocuses the field on
         // every reopen.
         .onReceive(NotificationCenter.default.publisher(for: .engrexQueryWindowDidShow)) { _ in
+            if isChatting && !isStreaming && Date().timeIntervalSince(lastActivity) > idleResetInterval {
+                clear()
+            }
             focusFieldShortly()
         }
     }
@@ -102,35 +127,7 @@ struct QueryView: View {
 
     private var searchBar: some View {
         HStack(spacing: 12) {
-            Button {
-                setUploadMode(!isUploadMode)
-            } label: {
-                Image(systemName: isUploadMode ? "xmark" : "doc.badge.plus")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(isUploadMode ? AnyShapeStyle(theme.gradient) : AnyShapeStyle(Color.secondary))
-            }
-            .buttonStyle(.plain)
-            .help(isUploadMode ? "Cancel" : "Add a file to ingest")
-
-            Button {
-                openEngrexFolder()
-            } label: {
-                Image(systemName: "folder")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Open the Engrex folder")
-
-            Button {
-                setGraphMode(!isGraphMode)
-            } label: {
-                Image(systemName: isGraphMode ? "xmark" : "point.3.connected.trianglepath.dotted")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(isGraphMode ? AnyShapeStyle(theme.gradient) : AnyShapeStyle(Color.secondary))
-            }
-            .buttonStyle(.plain)
-            .help(isGraphMode ? "Close the graph" : "Open the knowledge graph")
+            toolButtons
 
             Divider()
                 .frame(height: 22)
@@ -149,7 +146,10 @@ struct QueryView: View {
                 .font(.system(size: 20, weight: .regular))
                 .focused($isFieldFocused)
                 .onChange(of: queryText) { _, newValue in
-                    processTags(newValue)
+                    let remaining = extractTags(from: newValue)
+                    if remaining != newValue {
+                        queryText = remaining
+                    }
                 }
                 .onSubmit { submitQuery() }
 
@@ -188,6 +188,153 @@ struct QueryView: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: tags)
     }
 
+    // Upload, folder and graph. Shared by the search bar and the chat composer
+    private var toolButtons: some View {
+        HStack(spacing: 12) {
+            Button {
+                setUploadMode(!isUploadMode)
+            } label: {
+                Image(systemName: isUploadMode ? "xmark" : "doc.badge.plus")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isUploadMode ? AnyShapeStyle(theme.gradient) : AnyShapeStyle(Color.secondary))
+            }
+            .buttonStyle(.plain)
+            .help(isUploadMode ? "Cancel" : "Add a file to ingest")
+
+            Button {
+                openEngrexFolder()
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Open the Engrex folder")
+
+            Button {
+                setGraphMode(!isGraphMode)
+            } label: {
+                Image(systemName: isGraphMode ? "xmark" : "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(isGraphMode ? AnyShapeStyle(theme.gradient) : AnyShapeStyle(Color.secondary))
+            }
+            .buttonStyle(.plain)
+            .help(isGraphMode ? "Close the graph" : "Open the knowledge graph")
+        }
+    }
+
+    // The follow-up input under the answers, laid out like the AI_Chat template: a
+    // growing text box with a toolbar under it. The tools stay in the search bar above
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextField("Ask a follow-up…", text: $followUpText, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 16, weight: .regular))
+                .lineLimit(1...6)
+                .focused($isFollowUpFocused)
+                .onChange(of: followUpText) { _, newValue in
+                    let remaining = extractTags(from: newValue)
+                    if remaining != newValue {
+                        followUpText = remaining
+                    }
+                }
+                // Return sends and Shift-Return adds a line, as in the template
+                .onKeyPress(.return, phases: .down) { press in
+                    if press.modifiers.contains(.shift) {
+                        followUpText += "\n"
+                        return .handled
+                    }
+                    submitFollowUp()
+                    return .handled
+                }
+                .onSubmit { submitFollowUp() }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 6)
+
+            HStack(spacing: 12) {
+                Button {
+                    clear()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("New chat")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.18), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .help("Start a new conversation")
+
+                Spacer()
+
+                sendButton
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(
+                    isFollowUpFocused ? AnyShapeStyle(theme.gradient) : AnyShapeStyle(Color.white.opacity(0.12)),
+                    lineWidth: isFollowUpFocused ? 1.5 : 1
+                )
+        )
+        .shadow(color: isFollowUpFocused ? theme.glowColor.opacity(0.35) : .clear, radius: 14)
+        .animation(.easeInOut(duration: 0.25), value: isFollowUpFocused)
+        .animation(.easeInOut(duration: 0.2), value: followUpText.isEmpty)
+        .animation(.easeInOut(duration: 0.2), value: isStreaming)
+    }
+
+    private var canSend: Bool {
+        !isStreaming && !followUpText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // Fills with the theme gradient once there's something to send, and turns into the
+    // thinking dots while an answer streams
+    @ViewBuilder
+    private var sendButton: some View {
+        if isStreaming {
+            ThinkingIndicator(gradient: theme.gradient)
+                .frame(width: 30, height: 30)
+                .transition(.opacity)
+        } else {
+            Button {
+                submitFollowUp()
+            } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(canSend ? AnyShapeStyle(Color.white) : AnyShapeStyle(Color.secondary))
+                    .frame(width: 30, height: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(canSend ? AnyShapeStyle(theme.gradient) : AnyShapeStyle(Color.clear))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.white.opacity(canSend ? 0 : 0.18), lineWidth: 1)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .help("Send")
+            .transition(.opacity)
+        }
+    }
+
     private func chipView(_ flag: String) -> some View {
         let label = knownFlags.first(where: { $0.flag == flag })?.label ?? flag
         return HStack(spacing: 5) {
@@ -207,10 +354,10 @@ struct QueryView: View {
         .transition(.scale.combined(with: .opacity))
     }
 
-    // Extracts completed flag tokens (flag followed by a space) from the field and
-    // turns them into chips, leaving partially typed flags alone.
-    private func processTags(_ newValue: String) {
-        var remaining = newValue
+    // Turns completed flag tokens (flag followed by a space) into chips and returns the
+    // text without them, leaving partially typed flags alone. Both inputs share the chips
+    private func extractTags(from text: String) -> String {
+        var remaining = text
         for known in knownFlags {
             let token = known.flag + " "
             while let range = remaining.range(of: token) {
@@ -220,9 +367,7 @@ struct QueryView: View {
                 remaining.removeSubrange(range)
             }
         }
-        if remaining != newValue {
-            queryText = remaining
-        }
+        return remaining
     }
 
     private var graphView: some View {
@@ -279,147 +424,6 @@ struct QueryView: View {
         .animation(.easeInOut(duration: 0.2), value: isDropTargeted)
     }
 
-    private var answerArea: some View {
-        HStack(alignment: .top, spacing: 14) {
-            answerScroll
-
-            if !sources.isEmpty {
-                sourcesPanel
-                    .frame(width: 200)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
-        }
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: sources)
-    }
-
-    private var answerScroll: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if answer.isEmpty && isStreaming {
-                        Text("Thinking…")
-                            .font(.system(size: 15))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        MarkdownText(markdown: answer, fontSize: 16)
-                            .foregroundStyle(.primary)
-                    }
-                    Color.clear.frame(height: 1).id("bottom")
-                }
-                .padding(20)
-            }
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.black.opacity(0.18))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(theme.softGradient, lineWidth: 1)
-            )
-            .onChange(of: answer) { _, _ in
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
-            }
-        }
-    }
-
-    private var sourcesPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("SOURCES")
-                .font(.system(size: 11, weight: .bold))
-                .kerning(0.5)
-                .foregroundStyle(.secondary)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(sources, id: \.self) { source in
-                        sourceRow(source)
-                    }
-                }
-            }
-        }
-        .padding(14)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.black.opacity(0.18))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(theme.softGradient, lineWidth: 1)
-        )
-    }
-
-    private func sourceRow(_ source: String) -> some View {
-        let name = displayName(for: source)
-        return Button {
-            openSource(source)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: iconName(for: source))
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.gradient)
-                Text(name)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .help("Open \(name)")
-    }
-
-    private func isWebURL(_ source: String) -> Bool {
-        return source.hasPrefix("http://") || source.hasPrefix("https://")
-    }
-
-    private func displayName(for source: String) -> String {
-        if isWebURL(source) {
-            return URL(string: source)?.host ?? source
-        }
-        return (source as NSString).lastPathComponent
-    }
-
-    private func openSource(_ source: String) {
-        if isWebURL(source) {
-            if let url = URL(string: source) {
-                NSWorkspace.shared.open(url)
-            }
-        } else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: source))
-        }
-    }
-
-    private func iconName(for source: String) -> String {
-        if isWebURL(source) {
-            return "globe"
-        }
-        switch (source as NSString).pathExtension.lowercased() {
-        case "pdf":
-            return "doc.richtext"
-        case "docx":
-            return "doc.text.fill"
-        case "md":
-            return "text.alignleft"
-        case "html", "htm":
-            return "globe"
-        default:
-            return "doc.text"
-        }
-    }
-
     private func setUploadMode(_ on: Bool) {
         withAnimation {
             isUploadMode = on
@@ -430,7 +434,7 @@ struct QueryView: View {
             isFieldFocused = false
             onResize(uploadSize)
         } else {
-            onResize(hasSubmitted ? expandedSize : compactSize)
+            onResize(isChatting ? chatSize : compactSize)
         }
     }
 
@@ -464,7 +468,7 @@ struct QueryView: View {
             isFieldFocused = false
             onResize(graphSize)
         } else {
-            onResize(hasSubmitted ? expandedSize : compactSize)
+            onResize(isChatting ? chatSize : compactSize)
         }
     }
 
@@ -490,16 +494,34 @@ struct QueryView: View {
         return handledAny
     }
 
+    // The search bar always starts a new conversation, and the question stays in it so
+    // the top of the window shows what the conversation is about
     private func submitQuery() {
         let trimmed = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isStreaming else { return }
+        messages = []
+        followUpText = ""
+        send(trimmed)
+    }
 
+    private func submitFollowUp() {
+        let trimmed = followUpText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isStreaming, isChatting else { return }
+        followUpText = ""
+        send(trimmed)
+    }
+
+    private func send(_ question: String) {
         // Re-attach the chip flags so the daemon receives them for parsing.
         let flagString = tags.joined(separator: " ")
-        let fullQuery = [trimmed, flagString].filter { !$0.isEmpty }.joined(separator: " ")
+        let fullQuery = [question, flagString].filter { !$0.isEmpty }.joined(separator: " ")
 
-        answer = ""
-        sources = []
+        // History is everything before this question. The daemon strips flags and its
+        // own grounding notes from it, so the transcript is sent as shown
+        let history = messages
+        let reply = ChatMessage(role: .assistant, text: "")
+        let replyID = reply.id
+
         if isUploadMode {
             withAnimation { isUploadMode = false }
             onUploadModeChanged(false)
@@ -507,26 +529,42 @@ struct QueryView: View {
         if isGraphMode {
             withAnimation { isGraphMode = false }
         }
-        onResize(expandedSize)
+        lastActivity = Date()
         withAnimation {
-            hasSubmitted = true
-            isStreaming = true
+            messages.append(ChatMessage(role: .user, text: question))
+            messages.append(reply)
+            streamingMessageID = replyID
         }
+        onResize(chatSize)
 
+        // Every callback looks the reply up by ID, since New chat can drop it while the
+        // answer is still streaming
         socketClient.sendQuery(
             text: fullQuery,
+            history: history,
             model: ModelSetting.shared.modelForQuery,
             onSources: { sources in
-                withAnimation { self.sources = sources }
-                if !sources.isEmpty {
-                    self.onResize(self.expandedWithSourcesSize)
-                }
+                guard let index = self.messages.firstIndex(where: { $0.id == replyID }) else { return }
+                withAnimation { self.messages[index].sources = sources }
             },
             onToken: { token in
-                self.answer += token
+                guard let index = self.messages.firstIndex(where: { $0.id == replyID }) else { return }
+                self.messages[index].text += token
             },
-            onComplete: { _ in
-                withAnimation { self.isStreaming = false }
+            onComplete: { error in
+                if let error, let index = self.messages.firstIndex(where: { $0.id == replyID }),
+                   self.messages[index].text.isEmpty {
+                    self.messages[index].text = error.localizedDescription
+                }
+                if self.streamingMessageID == replyID {
+                    withAnimation { self.streamingMessageID = nil }
+                    // Ready for a follow-up once the answer is in, unless a new question
+                    // is already being typed up top
+                    if !self.isFieldFocused {
+                        self.isFollowUpFocused = true
+                    }
+                }
+                self.lastActivity = Date()
             }
         )
     }
@@ -536,9 +574,9 @@ struct QueryView: View {
         onUploadModeChanged(false)
         withAnimation {
             queryText = ""
-            answer = ""
-            sources = []
-            hasSubmitted = false
+            followUpText = ""
+            messages = []
+            streamingMessageID = nil
             isUploadMode = false
             isGraphMode = false
             tags = []

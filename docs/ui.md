@@ -15,9 +15,12 @@ CLI uses.
 | `AccessibilityReader.swift` | Reads the selected text for ⌘⇧B (AX API, with a clipboard fallback) |
 | `SocketClient.swift` | POSIX Unix-socket client; speaks the daemon's JSON/stream protocol |
 | `QueryWindow.swift` | The floating panel (`NSPanel`) — sizing, positioning, entrance animation |
-| `QueryView.swift` | The SwiftUI content — search bar, streaming answer, sources panel, upload zone, chips |
+| `QueryView.swift` | The SwiftUI content — search bar, chat state, follow-up composer, upload zone, chips |
+| `ChatMessage.swift` | One chat message: role, text, and the sources its answer used |
+| `ChatTranscript.swift` | The scrolling conversation: question bubbles, Markdown answers, source pills |
+| `MarkdownText.swift` | Renders answers as Markdown: headings, nested bullets, numbered lists, code blocks, inline styling |
 | `VisualEffectView.swift` | Bridges `NSVisualEffectView` for the glass background |
-| `ModelSetting.swift` | Which generation model queries use; persists the Deep thinking toggle and fetches model names from the daemon |
+| `ModelSetting.swift` | Which generation model queries use; persists the Deep thinking and Use Gemini toggles and fetches model names from the daemon |
 | `Theme.swift` | The color presets |
 | `ToastPresenter.swift` | The floating "Saved to Engrex" HUD |
 | `FileIngestor.swift` | Sends dropped/picked files to the daemon's `addfile` command |
@@ -33,8 +36,25 @@ CLI uses.
 
 - Starts as a compact search bar in the upper third of the screen.
 - On submit, it expands and streams the answer in, with an animated "thinking"
-  indicator. If the answer has sources, a **sources panel** slides in beside it —
-  each row opens the original file or URL.
+  indicator. Answers are rendered as Markdown by `MarkdownText`. SwiftUI's markdown
+  parsing only covers inline styling, so `MarkdownBlock.parse` splits out headings,
+  `*`/`-`/`+` bullets (two spaces of indent per level), numbered items and code fences,
+  and each block's inline bold, italic, code and links go through
+  `AttributedString(markdown:)`. It reparses on every streamed token. A fence that
+  hasn't closed yet shows as an open code block, and inline markup that doesn't parse
+  yet falls back to plain text. Each answer's sources show as pills under it; each
+  pill opens the original file or URL.
+- **Follow-ups:** once an answer is in, a composer at the bottom ("Ask a follow-up…")
+  takes the next question. The search bar stays on top and keeps the opening question,
+  which the transcript doesn't repeat. Return sends and Shift-Return adds a line. The
+  window opens to 540pt on the first answer and grows down 140pt per follow-up, up to
+  820pt or the bottom of the screen (`QueryWindow.resize` keeps the top edge fixed).
+  The composer takes focus when an answer finishes, unless you're typing in the search
+  bar.
+- **Starting over:** submitting from the search bar, "+ New chat", or the ✕ all start a
+  new conversation. The conversation lives only in `QueryView`'s state; each query sends
+  the messages before it as `history` (`SocketClient.sendQuery`), and nothing is saved
+  across launches. See [rag-pipeline.md](rag-pipeline.md#conversations).
 - **Themes:** pick a color preset from the menu-bar Theme submenu; it recolors the
   whole UI and persists (`@AppStorage`).
 - **File upload:** the 📄 button opens an upload mode — a big drag-and-drop / click-to-
@@ -70,6 +90,19 @@ if that fetch fails, it sends an empty model and the daemon uses its default.
 
 The setting persists in `UserDefaults` under `engrex.useDeepModel`.
 
+## The Use Gemini toggle
+
+A second checkable item (⌘G) that sends answers to Google's Gemini (the daemon's
+`cloud` model) in place of Ollama. When it's on it wins over Deep thinking, which greys
+out because it does nothing then. It's disabled, labelled "no key in .env", whenever
+the daemon reports no `cloud` model.
+
+The controller is the menu's delegate and re-runs the `models` fetch in `menuWillOpen`,
+so adding a key to `.env` enables the item the next time you open the menu. The
+tooltip warns that each question's retrieved passages are sent to Google. The setting
+persists under `engrex.useCloudModel`, but it only takes effect while the daemon
+reports a key (`ModelSetting.isUsingCloud`).
+
 ## Window reuse
 
 The query panel is created once and reused. `openQueryWindow` previously destroyed and
@@ -85,7 +118,8 @@ Two consequences of reusing it:
 - `.onAppear` now fires only once ever, so the search field would never regain focus.
   The window posts `engrexQueryWindowDidShow` on every show and `QueryView` listens for
   it. Existing text is selected on reopen, so typing starts a new question while the
-  previous answer stays until you submit.
+  previous answer stays until you submit. A conversation idle for more than 30 minutes
+  (`idleResetInterval`) is cleared on reopen, unless an answer is still streaming.
 
 ## Building the app
 

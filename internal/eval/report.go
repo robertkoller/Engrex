@@ -114,7 +114,25 @@ func (report Report) Write(out io.Writer, baseline Baseline, hasBaseline bool) {
 	fmt.Fprintln(out)
 
 	report.writeHopSplit(out)
+	report.writeFollowUpSplit(out)
 	report.writeMisses(out)
+}
+
+// writeFollowUpSplit reports first questions and follow-ups separately. Recall@5 is
+// shown because 5 passages is what an answer actually gets
+func (report Report) writeFollowUpSplit(out io.Writer) {
+	firstTurn := report.Slice(func(testCase Case) bool { return len(testCase.History) == 0 })
+	followUp := report.Slice(func(testCase Case) bool { return len(testCase.History) > 0 })
+	if len(followUp.Results) == 0 {
+		return
+	}
+
+	fmt.Fprintf(out, "\n%-12s %6s %8s %8s\n", "SLICE", "CASES", "MRR", "recall@5")
+	fmt.Fprintln(out, strings.Repeat("-", 38))
+	fmt.Fprintf(out, "%-12s %6d %8.3f %8.3f\n",
+		"first turn", len(firstTurn.Results), firstTurn.MRR, firstTurn.RecallAtK[5])
+	fmt.Fprintf(out, "%-12s %6d %8.3f %8.3f\n",
+		"follow-up", len(followUp.Results), followUp.MRR, followUp.RecallAtK[5])
 }
 
 // writeHopSplit reports single-hop and multi-hop cases separately. The gap between

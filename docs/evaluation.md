@@ -15,6 +15,7 @@ is the prerequisite for every later retrieval change — see
 engrex eval                          # score against the committed baseline
 engrex eval --save --label baseline  # freeze this run's numbers as the new baseline
 engrex eval --set eval/mine.json     # use a different golden set
+engrex eval --set eval/conversations.json --raw-followups   # follow-ups searched verbatim
 ```
 
 Requires Ollama running, since every question is really embedded and really retrieved.
@@ -38,6 +39,14 @@ Requires Ollama running, since every question is really embedded and really retr
   than absolute paths so the set survives files being moved.
 - **`hops`** of 2 or more marks a question needing evidence from several documents.
 - **`note`** is for you; it never affects scoring.
+- **`history`** (optional) makes the case a chat follow-up: the earlier turns as
+  `[{"role": "user" | "assistant", "content": "..."}]`, with `question` as the next
+  message. Follow-ups are retrieved with `rag.RetrieveConversation`, condensing them the
+  way a live chat does. `--raw-followups` searches them verbatim instead, which is the
+  baseline condensing is measured against.
+
+`eval/conversations.json` holds seven starter follow-up cases. They ask about the files
+in `docs/`, so they only score anything on a corpus that has those ingested.
 
 ### Writing a good set
 
@@ -70,6 +79,12 @@ When the set contains multi-hop cases, the report breaks single-hop and multi-ho
 performance out separately. That gap is the entire argument for or against multi-hop
 retrieval: if multi-hop questions score as well as single-hop ones, an agentic loop is
 latency with no payoff.
+
+### The follow-up split
+
+When the set contains cases with `history`, the report adds MRR and recall@5 for first
+turns and follow-ups separately (recall@5 because five passages is what an answer gets).
+Run once with and once without `--raw-followups` to see what condensing buys.
 
 ### The miss list
 

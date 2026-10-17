@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/robertkoller/engrex/internal/protocol"
 )
 
 // Case is one golden-set entry: a question, and the sources that genuinely answer it.
@@ -28,6 +30,11 @@ type Case struct {
 	// report separate single-hop from multi-hop performance, which is the comparison
 	// that justifies (or sinks) agentic retrieval later.
 	Hops int `json:"hops,omitempty"`
+
+	// History makes the case a follow-up: the earlier turns of a conversation, with
+	// Question as the next message. Reported as its own slice, since a follow-up
+	// searched verbatim is the failure condensing exists to fix
+	History []protocol.Turn `json:"history,omitempty"`
 
 	// Note is free text for why the case is in the set. Never used in scoring.
 	Note string `json:"note,omitempty"`
@@ -99,7 +106,7 @@ func Load(path string) (Set, error) {
 // Retriever is the retrieval path under test. Returning source identifiers rather than
 // chunks keeps the harness independent of how retrieval is implemented, so the same
 // golden set can score the current pipeline, a reranked one, or an agentic one.
-type Retriever func(question string, topK int) ([]string, error)
+type Retriever func(testCase Case, topK int) ([]string, error)
 
 // Run scores every case in the set, retrieving max(ks) results per question.
 func Run(set Set, retrieve Retriever, ks []int) (Report, error) {
@@ -121,7 +128,7 @@ func Run(set Set, retrieve Retriever, ks []int) (Report, error) {
 
 	for _, testCase := range set.Cases {
 		start := time.Now()
-		retrieved, err := retrieve(testCase.Question, maxK)
+		retrieved, err := retrieve(testCase, maxK)
 		latency := time.Since(start)
 		if err != nil {
 			return Report{}, fmt.Errorf("retrieving %q: %w", testCase.Question, err)
@@ -216,15 +223,15 @@ func (report Report) Misses() []Result {
 // Slice returns a sub-report over only the cases matching a predicate, so single-hop
 // and multi-hop performance can be reported separately.
 func (report Report) Slice(include func(Case) bool) Report {
-	var subset Set
-	byQuestion := map[string]Result{}
+	// Kept as results rather than looked up by question, since follow-ups like "what
+	// about the second one?" repeat across conversations
+	var subset []Result
 	for _, result := range report.Results {
 		if include(result.Case) {
-			subset.Cases = append(subset.Cases, result.Case)
-			byQuestion[result.Case.Question] = result
+			subset = append(subset, result)
 		}
 	}
-	if len(subset.Cases) == 0 {
+	if len(subset) == 0 {
 		return Report{Ks: report.Ks, RecallAtK: map[int]float64{}}
 	}
 
@@ -237,8 +244,8 @@ func (report Report) Slice(include func(Case) bool) Report {
 	}
 	reciprocalRankTotal := 0.0
 	recallTotals := make(map[int]float64)
-	for _, testCase := range subset.Cases {
-		result := byQuestion[testCase.Question]
+	for _, result := range subset {
+		testCase := result.Case
 		if result.FirstRelevantRank > 0 {
 			reciprocalRankTotal += 1.0 / float64(result.FirstRelevantRank)
 		}
@@ -249,7 +256,7 @@ func (report Report) Slice(include func(Case) bool) Report {
 		sliced.Latencies = append(sliced.Latencies, result.Latency)
 	}
 
-	caseCount := float64(len(subset.Cases))
+	caseCount := float64(len(subset))
 	sliced.MRR = reciprocalRankTotal / caseCount
 	for _, k := range report.Ks {
 		sliced.RecallAtK[k] = recallTotals[k] / caseCount

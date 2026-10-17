@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/robertkoller/engrex/internal/embedder"
 	"github.com/robertkoller/engrex/internal/gemini"
 	"github.com/robertkoller/engrex/internal/ingest"
+	"github.com/robertkoller/engrex/internal/protocol"
 	"github.com/robertkoller/engrex/internal/rerank"
 	"github.com/robertkoller/engrex/internal/rewrite"
 	"github.com/robertkoller/engrex/internal/store"
@@ -68,6 +70,16 @@ const rrfK = 60
 // the generation model changes underneath.
 const maxAnswerTokens = 400
 
+// maxHistoryMessages is how much of a conversation goes into the answer prompt. Only
+// the current turn's passages are included, so history is what grows the prompt, and
+// num_ctx and the KV cache grow with it. Three exchanges covers nearly every follow-up
+const maxHistoryMessages = 6
+
+// maxHistoryMessageChars caps one message. Answers are already capped at
+// maxAnswerTokens, so this mostly stops a pasted wall of text from crowding out the
+// passages
+const maxHistoryMessageChars = 2000
+
 // RAG wires the embedder, store, and LLM together into the add/query pipeline.
 type RAG struct {
 	embedder *embedder.Embedder
@@ -85,6 +97,12 @@ type RAG struct {
 	// verifier is optional. When set, answers are checked against the passages they
 	// were generated from and a grounding report is appended.
 	verifier verify.Verifier
+
+	// condenser rewrites follow-ups into standalone questions before retrieval. Always
+	// set, since a follow-up searched verbatim retrieves almost nothing. It stays on the
+	// local default model even when WithModel points answers elsewhere: it only needs to
+	// resolve a reference, and the fast model does that in a fraction of the time
+	condenser *rewrite.Condenser
 
 	// generateModel is resolved once at construction so every stage — answering,
 	// reranking, rewriting, verifying — uses the same model. Resolving per call would
@@ -107,6 +125,7 @@ func New(s *store.Store) (*RAG, error) {
 	return &RAG{
 		embedder:      embed,
 		store:         s,
+		condenser:     rewrite.NewCondenser(baseURL, config.GenerateModelName()),
 		generateModel: config.GenerateModelName(),
 		ollamaBaseURL: baseURL,
 	}, nil
@@ -424,12 +443,18 @@ func (r *RAG) DebugPrompt(question string, maxDistance float64, topK int) (strin
 		return "", err
 	}
 	if len(chunks) == 0 {
-		return buildNoContextPrompt(question), nil
+		return buildNoContextPrompt(question, nil), nil
 	}
-	return buildPrompt(question, chunks, options), nil
+	return buildPrompt(question, chunks, options, nil), nil
 }
 
 func (r *RAG) Retrieve(question string, maxDistance float64, topK int) ([]store.Chunk, error) {
+	return r.retrieve(question, nil, maxDistance, topK)
+}
+
+// retrieve searches for question plus any extra queries, fusing every ranking. The
+// reranker only ever judges against question
+func (r *RAG) retrieve(question string, extra []string, maxDistance float64, topK int) ([]store.Chunk, error) {
 	// Without a reranker there is nothing to filter the extra candidates back down, so
 	// over-fetching would just push noise into the prompt.
 	fetch := topK
@@ -444,6 +469,11 @@ func (r *RAG) Retrieve(question string, maxDistance float64, topK int) ([]store.
 			queries = rewritten
 		}
 	}
+	for _, query := range extra {
+		if !slices.Contains(queries, query) {
+			queries = append(queries, query)
+		}
+	}
 
 	fused, err := r.retrieveAcross(queries, maxDistance, fetch)
 	if err != nil {
@@ -456,6 +486,70 @@ func (r *RAG) Retrieve(question string, maxDistance float64, topK int) ([]store.
 	// sub-query — the sub-queries exist to widen recall, but relevance is still
 	// judged against what was asked.
 	return r.rerankChunks(question, fused, topK), nil
+}
+
+// RetrieveConversation retrieves for a question that may depend on earlier turns.
+//
+// Both the standalone version and the raw follow-up are searched and fused, so
+// condensing can only add candidates. A 4B condenser will sometimes swap a name for
+// one from the conversation ("the import one" became ".mode" in testing), and the raw
+// follow-up's keywords are what still find the right passage then. Reranking judges
+// against the standalone version, since the raw follow-up often means nothing alone
+func (r *RAG) RetrieveConversation(history []protocol.Turn, question string, maxDistance float64, topK int) ([]store.Chunk, error) {
+	if len(history) == 0 {
+		return r.Retrieve(question, maxDistance, topK)
+	}
+	standalone := r.condenser.Condense(history, question)
+	if standalone == question {
+		return r.Retrieve(question, maxDistance, topK)
+	}
+	log.Printf("condensed follow-up %q into %q", question, standalone)
+	return r.retrieve(standalone, []string{question}, maxDistance, topK)
+}
+
+// trimHistory drops empty and unknown turns, strips what the daemon itself appended to
+// past answers, and keeps the most recent maxHistoryMessages
+func trimHistory(history []protocol.Turn) []protocol.Turn {
+	var kept []protocol.Turn
+	for _, turn := range history {
+		if turn.Role != protocol.RoleUser && turn.Role != protocol.RoleAssistant {
+			continue
+		}
+		content := turn.Content
+		if turn.Role == protocol.RoleAssistant {
+			content = cleanAnswer(content)
+		} else {
+			content, _ = parseQueryFlags(content)
+		}
+		content = strings.TrimSpace(content)
+		if content == "" {
+			continue
+		}
+		if len(content) > maxHistoryMessageChars {
+			content = strings.ToValidUTF8(content[:maxHistoryMessageChars], "") + "..."
+		}
+		kept = append(kept, protocol.Turn{Role: turn.Role, Content: content})
+	}
+	if len(kept) > maxHistoryMessages {
+		kept = kept[len(kept)-maxHistoryMessages:]
+	}
+	return kept
+}
+
+// noContextNotice is written ahead of answers that had no passages to draw on
+const noContextNotice = "[No relevant notes found — answering from outside knowledge]"
+
+// groundingMarker opens the report verify.WriteReport appends after an answer
+const groundingMarker = "\n─── grounding:"
+
+// cleanAnswer removes the notice and grounding report from an answer the client sends
+// back as history. They describe the answer rather than being part of it, and a model
+// that sees them in the conversation starts writing its own
+func cleanAnswer(answer string) string {
+	if index := strings.Index(answer, groundingMarker); index >= 0 {
+		answer = answer[:index]
+	}
+	return strings.Replace(answer, noContextNotice, "", 1)
 }
 
 // retrieveAcross runs each query and fuses their results into one ranking.
@@ -541,9 +635,17 @@ func (r *RAG) rerankChunks(question string, chunks []store.Chunk, topK int) []st
 // Query embeds the question, retrieves the top-K most relevant chunks,
 // builds a RAG prompt, and streams the LLM response to stdout.
 func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK int) error {
-	question, options := parseQueryFlags(question)
+	return r.Converse(out, nil, question, maxDistance, topK)
+}
 
-	chunks, err := r.Retrieve(question, maxDistance, topK)
+// Converse is Query with the conversation so far. Follow-ups are condensed into a
+// standalone question for retrieval, and fresh passages are fetched every turn since a
+// follow-up often moves to something the first turn's passages never covered
+func (r *RAG) Converse(out io.Writer, history []protocol.Turn, question string, maxDistance float64, topK int) error {
+	question, options := parseQueryFlags(question)
+	history = trimHistory(history)
+
+	chunks, err := r.RetrieveConversation(history, question, maxDistance, topK)
 	if err != nil {
 		return err
 	}
@@ -554,10 +656,10 @@ func (r *RAG) Query(out io.Writer, question string, maxDistance float64, topK in
 
 	var prompt string
 	if len(chunks) == 0 {
-		fmt.Fprintln(out, "[No relevant notes found — answering from outside knowledge]")
-		prompt = buildNoContextPrompt(question)
+		fmt.Fprintln(out, noContextNotice)
+		prompt = buildNoContextPrompt(question, history)
 	} else {
-		prompt = buildPrompt(question, chunks, options)
+		prompt = buildPrompt(question, chunks, options, history)
 	}
 
 	answer, err := r.generate(out, prompt)
@@ -924,7 +1026,7 @@ func parseQueryFlags(question string) (string, queryOptions) {
 //
 // Each chunk is labelled with the document it came from and its section, so the model
 // can answer questions about *which* document says something, not just what it says.
-func buildPrompt(question string, chunks []store.Chunk, options queryOptions) string {
+func buildPrompt(question string, chunks []store.Chunk, options queryOptions, history []protocol.Turn) string {
 	var builder strings.Builder // yes im using string builder, no its not ai who wrote this ik that string builder is less compute
 
 	builder.WriteString("You are a personal knowledge assistant with access to the user's OWN saved notes and documents. ")
@@ -950,6 +1052,8 @@ func buildPrompt(question string, chunks []store.Chunk, options queryOptions) st
 		}
 		fmt.Fprintf(&builder, "8. When you use a passage, cite %s once in parentheses where you use it. Cite each document only once, not per sentence.\n", strings.Join(parts, " and "))
 	}
+
+	writeConversation(&builder, history)
 
 	// A manifest of the documents the passages came from, stated once and up front.
 	//
@@ -977,7 +1081,12 @@ func buildPrompt(question string, chunks []store.Chunk, options queryOptions) st
 	}
 
 	fmt.Fprintf(&builder, "QUESTION: %s\n\n", question)
-	builder.WriteString("Answer from the CONTEXT above only. If it is not there, say so rather than guessing. Cover every item the question asks about, each with the details and examples the CONTEXT gives for it, and nothing the question did not ask about.\nANSWER:")
+	builder.WriteString("Answer from the CONTEXT above only. If it is not there, say so rather than guessing. Cover every item the question asks about, each with the details and examples the CONTEXT gives for it, and nothing the question did not ask about.")
+	if len(history) > 0 {
+		// Small models otherwise copy their previous answer out of the conversation
+		builder.WriteString(" Answer only this new QUESTION and never repeat an earlier answer.")
+	}
+	builder.WriteString("\nANSWER:")
 
 	return builder.String()
 }
@@ -1010,15 +1119,33 @@ func chunkLabel(chunk store.Chunk) string {
 	return filepath.Base(chunk.Source)
 }
 
+// writeConversation adds the earlier turns ahead of the passages. It sits before the
+// CONTEXT rather than after so the question and the repeated rules stay at the end,
+// which is the part a small model actually weights
+func writeConversation(builder *strings.Builder, history []protocol.Turn) {
+	if len(history) == 0 {
+		return
+	}
+	builder.WriteString("\nCONVERSATION SO FAR. The QUESTION may refer back to it. Use it to work out what is being asked, but take facts only from the CONTEXT. The QUESTION may also ask about something the earlier answers never mentioned, so always check the CONTEXT for it before saying it is missing:\n")
+	for _, turn := range history {
+		speaker := "User"
+		if turn.Role == protocol.RoleAssistant {
+			speaker = "Assistant"
+		}
+		fmt.Fprintf(builder, "%s: %s\n", speaker, turn.Content)
+	}
+}
+
 // buildNoContextPrompt builds a prompt for when no stored notes are relevant.
 // Instructs the LLM to answer from its own knowledge and label it clearly.
-func buildNoContextPrompt(question string) string {
-	return fmt.Sprintf(
-		"You are a personal knowledge assistant. The user has no saved notes relevant to this question. "+
-			"Answer from your own training knowledge, but start your response with \"[outside knowledge]: \" "+
-			"to make clear this answer does not come from their saved notes.\n\nQuestion: %s",
-		question,
-	)
+func buildNoContextPrompt(question string, history []protocol.Turn) string {
+	var builder strings.Builder
+	builder.WriteString("You are a personal knowledge assistant. The user has no saved notes relevant to this question. " +
+		"Answer from your own training knowledge, but start your response with \"[outside knowledge]: \" " +
+		"to make clear this answer does not come from their saved notes.\n")
+	writeConversation(&builder, history)
+	fmt.Fprintf(&builder, "\nQuestion: %s", question)
+	return builder.String()
 }
 
 // Writes a .txt stub for raw CLI/hotkey text into ~/Engrex/RawText so the user can

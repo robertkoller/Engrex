@@ -24,7 +24,8 @@ Listens on `~/.engrex/daemon.sock`. This is how the **CLI**, the **Swift app**, 
 
 ```json
 { "type": "add | query | delete | addfile | search | document | graph | models",
-  "text": "...", "source": "...", "limit": 0, "depth": 0, "model": "" }
+  "text": "...", "source": "...", "limit": 0, "depth": 0, "model": "",
+  "history": [{ "role": "user | assistant", "content": "..." }] }
 ```
 
 Write and query commands:
@@ -32,12 +33,16 @@ Write and query commands:
 - **add** — `rag.Add(text, source, "")`, replies `{}` or `{"error":"…"}`.
 - **query** — streams the answer back (sources JSON line, then tokens). See
   [rag-pipeline.md](rag-pipeline.md#query-wire-protocol). Accepts an optional `model`
-  (see below).
+  (see below) and an optional `history`, the earlier turns of a chat, which the
+  handler passes to `rag.Converse`. The daemon stores no conversations; see
+  [rag-pipeline.md](rag-pipeline.md#conversations).
 - **delete** — `store.Delete(spec)` where `spec` is like `1,5,7-9`.
 - **addfile** — copies + ingests a file with origin (see [ingestion.md](ingestion.md)).
 - **models** — reports the model names this daemon offers, as
-  `{"default": "...", "deep": "..."}`. Clients use it so model names live in one place
-  instead of being hardcoded into every UI.
+  `{"default": "...", "deep": "...", "cloud": "..."}`. Clients use it so model names
+  live in one place instead of being hardcoded into every UI. `cloud` is the Gemini
+  model, and is left out when no Gemini key is found. The key is looked up on each
+  `models` call, so adding one needs no restart.
 
 ### Per-query model selection
 
@@ -45,6 +50,9 @@ Write and query commands:
 routes that one question elsewhere. This is how the app's **Deep thinking** toggle
 works — a slower, more capable model for the questions that need it, with no daemon
 restart and no saved-config change.
+
+A `gemini-` model name sends that question's answer step, retrieved passages included,
+to Google instead of Ollama. See [rag-pipeline.md](rag-pipeline.md#gemini-optional-cloud-answers).
 
 The handler routes through `rag.WithModel`, which returns a **copy** of the pipeline
 rather than mutating it. The daemon shares one `RAG` across concurrent connections, so
@@ -80,25 +88,46 @@ ingestion under this model.
 
 Listens on `127.0.0.1:7777` (loopback only — nothing is exposed to the network). It
 exists because **browsers can't speak Unix sockets**, so the extension needs HTTP.
-One route:
+Two routes:
 
 ```
-POST /capture   { "text": "...", "url": "...", "title": "..." }
+POST /capture        { "text": "...", "url": "...", "title": "...", "format": "markdown" | "" }
+POST /capture-file?name=<file name>&url=<page url>&title=<title>   (body: the raw file)
 ```
 
-It sets CORS headers (the extension is a different origin), handles the `OPTIONS`
-preflight, and on success calls `rag.Add(text, title, url)`.
+`/capture` sets CORS headers (the extension is a different origin), handles the
+`OPTIONS` preflight, and calls `rag.AddTyped(text, title, url, contentType)`. The title
+falls back to the URL when empty. `format: "markdown"` (Google Docs exports) runs the
+text through `ingest.CleanMarkdown` and chunks it on headings. Anything else is plain
+text, with vertical tabs (how Slides' text export marks line breaks) turned into
+newlines.
+
+`/capture-file` takes a file the extension downloaded from Google Drive. It rejects
+types `ingest.IsSupported` doesn't know (415) and bodies over 100 MB (413). It writes the
+body to a temp file with the same extension, extracts it with the same code as a file
+dropped into `~/Engrex`, deletes the temp file, and ingests with the file name as the
+source. It sends no CORS headers, so a web page can't read its response. Details in
+[ingestion.md](ingestion.md#google-drive-files).
+
+**Known gap:** neither route checks who is calling. `/capture` answers any origin
+(`Access-Control-Allow-Origin: *`). `/capture-file` doesn't check `Content-Type`, so a
+page can send a `text/plain` POST, which skips the CORS preflight. Either way, any
+website open in your browser could post text or a file into your notes. It can't read
+anything back.
 
 ### 3. Graph server — `internal/graphserver`
 
 Binds `127.0.0.1:7778`. Serves `/graph` and `/query` as JSON for the document-web view,
-and the static assets behind it from the `web/` directory.
+and the static assets behind it from `web/`, which `web/embed.go` embeds into the binary
+(`http.FS(web.FS)`). The page works wherever the daemon was started, but a change to
+`web/` only shows after a rebuild, `make install` and a daemon restart.
 
-**Known bug:** those assets are served with `http.FileServer(http.Dir("web"))` — a path
-relative to the daemon's working directory. Run under launchd, the working directory is
-`/`, so `/` returns 404 while `/graph` still answers. It works only when the daemon is
-started from the repository root. Embedding the assets in the binary would remove the
-dependency on where the process was launched.
+`/graph` comes from `store.GraphData`, which folds chunk-level `relations` into one edge
+per document pair. See [data-model.md](data-model.md#relations--the-knowledge-graph-edges)
+for when a pair gets an edge. The page (`web/app.js`) lays it out with a D3 force
+simulation. Repulsion only reaches 260px (`distanceMax`) and a weak `forceX`/`forceY`
+pull (0.08) keeps documents with no edges near the rest. The view zooms to fit all nodes
+once, when the first layout settles.
 
 ### 4. File watcher — `internal/watcher`
 

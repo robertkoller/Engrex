@@ -107,7 +107,7 @@ func (socket *Socket) handleConnection(conn net.Conn) {
 		// WithModel returns a copy, so a per-query model choice can't leak into other
 		// connections sharing this daemon.
 		pipeline := socket.rag.WithModel(command.Model)
-		if err := pipeline.Query(conn, command.Text, rag.DefaultSearchDistance, rag.DefaultSearchResults); err != nil {
+		if err := pipeline.Converse(conn, command.History, command.Text, rag.DefaultSearchDistance, rag.DefaultSearchResults); err != nil {
 			fmt.Fprintf(conn, "\n[Error: %v]\n", err)
 		}
 	case "delete":

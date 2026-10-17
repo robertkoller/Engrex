@@ -8,6 +8,7 @@ import (
 
 	"github.com/robertkoller/engrex/internal/eval"
 	ragpkg "github.com/robertkoller/engrex/internal/rag"
+	"github.com/robertkoller/engrex/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -27,6 +28,7 @@ func evalCommand(rag *ragpkg.RAG) *cobra.Command {
 	var maxDistance float64
 	var withRerank bool
 	var withRewrite bool
+	var rawFollowUps bool
 
 	command := &cobra.Command{
 		Use:   "eval",
@@ -56,12 +58,23 @@ func evalCommand(rag *ragpkg.RAG) *cobra.Command {
 			if len(stages) == 0 {
 				stages = append(stages, "baseline hybrid")
 			}
+			if rawFollowUps {
+				stages = append(stages, "raw follow-ups")
+			}
 			fmt.Printf("pipeline: %s\n", strings.Join(stages, " + "))
 
 			// The retriever returns each hit's document identity, which is what the golden
 			// set matches on — the origin a file was added from when known, else its path.
-			retrieve := func(question string, topK int) ([]string, error) {
-				chunks, err := rag.Retrieve(question, maxDistance, topK)
+			// Follow-ups are condensed the way a live chat would, unless --raw-followups
+			// asks for the verbatim search that condensing is measured against
+			retrieve := func(testCase eval.Case, topK int) ([]string, error) {
+				var chunks []store.Chunk
+				var err error
+				if rawFollowUps {
+					chunks, err = rag.Retrieve(testCase.Question, maxDistance, topK)
+				} else {
+					chunks, err = rag.RetrieveConversation(testCase.History, testCase.Question, maxDistance, topK)
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -108,6 +121,7 @@ func evalCommand(rag *ragpkg.RAG) *cobra.Command {
 		"maximum cosine distance for a vector hit to count")
 	command.Flags().BoolVar(&withRerank, "rerank", false, "score with the reranking stage enabled")
 	command.Flags().BoolVar(&withRewrite, "rewrite", false, "score with query rewriting enabled")
+	command.Flags().BoolVar(&rawFollowUps, "raw-followups", false, "search follow-up cases verbatim instead of condensing them")
 	return command
 }
 

@@ -41,6 +41,11 @@ similarity = cosine(embed(semantic part), stored embedding)     within that name
 ```
 
 A hit therefore guarantees the stored answer was generated from **identical** context.
+For answer prompts, the passages and document manifest are sorted before hashing
+(`canonicalAnswerContext`), because rewordings of a question usually retrieve the same
+passages in a different rank order. Before that, those all missed with an empty
+namespace. Every passage still has to match byte for byte. See
+[cache/docs/design.md](../cache/docs/design.md#passage-order-is-not-part-of-the-namespace).
 The measurements below show this is what carries the whole design: with the context
 hashed into the key, the false-hit rate is zero across every threshold tested, because a
 namespace only ever contains different wordings of the same question.
@@ -296,3 +301,6 @@ The changes outside `cache/` are four:
 3. `internal/socket/readonly.go` — the "Ollama unreachable" heuristic matched the literal
    `11434`; it now reads the configured port.
 4. `Makefile` — `cache`, `cache-install`, `cache-serve`, `cache-bench`, `cache-calibrate`.
+
+Answers from the optional Gemini backend skip the cache entirely: `rag.generate` calls
+Google directly, and the proxy only speaks Ollama's protocol.

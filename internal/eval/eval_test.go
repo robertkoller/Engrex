@@ -4,6 +4,8 @@ import (
 	"math"
 	"os"
 	"testing"
+
+	"github.com/robertkoller/engrex/internal/protocol"
 )
 
 func writeFile(path, contents string) error {
@@ -13,8 +15,8 @@ func writeFile(path, contents string) error {
 // staticRetriever returns a fixed result list per question, so scoring can be tested
 // without Ollama or a database.
 func staticRetriever(byQuestion map[string][]string) Retriever {
-	return func(question string, topK int) ([]string, error) {
-		results := byQuestion[question]
+	return func(testCase Case, topK int) ([]string, error) {
+		results := byQuestion[testCase.Question]
 		if len(results) > topK {
 			results = results[:topK]
 		}
@@ -158,5 +160,30 @@ func TestLoadRejectsIncompleteCases(t *testing.T) {
 	writeSet(`{"cases": [{"question": "q", "relevant": ["a.md"]}]}`)
 	if _, err := Load(path); err != nil {
 		t.Errorf("valid set rejected: %v", err)
+	}
+}
+
+// Follow-ups like "what about the second one?" repeat across conversations, so a slice
+// must keep each case's own result rather than one per question text
+func TestSliceKeepsRepeatedFollowUpsApart(t *testing.T) {
+	history := []protocol.Turn{{Role: protocol.RoleUser, Content: "earlier"}}
+	set := Set{Cases: []Case{
+		{Question: "what about the second one?", Relevant: []string{"a.md"}, History: history},
+		{Question: "what about the second one?", Relevant: []string{"b.md"}, History: history},
+	}}
+	retrieve := func(testCase Case, topK int) ([]string, error) {
+		return []string{"/notes/a.md"}, nil
+	}
+
+	report, err := Run(set, retrieve, []int{1, 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	followUp := report.Slice(func(testCase Case) bool { return len(testCase.History) > 0 })
+	if len(followUp.Results) != 2 {
+		t.Fatalf("slice kept %d results, want 2", len(followUp.Results))
+	}
+	if !closeEnough(followUp.MRR, 0.5) {
+		t.Errorf("MRR = %.3f, want 0.5 (one hit, one miss)", followUp.MRR)
 	}
 }

@@ -736,6 +736,17 @@ func DocumentKey(source, origin string, chunkID int64) string {
 	return fmt.Sprintf("chunk:%d", chunkID)
 }
 
+// minDocumentLinks is how many chunk pairs have to link two documents before the graph
+// draws an edge between them. A single pair is often a coincidence: a numpy page and
+// SQL slides were linked through one pair of passages that both happened to be about
+// "filtering", at 0.316, while related documents were linked by 5 to 7 pairs
+const minDocumentLinks = 2
+
+// strongLinkDistance lets a single chunk pair link two documents when it's close enough
+// that it can't be a coincidence. Short notes are one chunk, so they would otherwise
+// only connect to documents long enough to match them twice
+const strongLinkDistance = 0.25
+
 // GraphData returns the knowledge graph with one node per document (not chunks)
 func (store *Store) GraphData() (Graph, error) {
 	rows, err := store.db.Query(`SELECT id, text, source, origin, created_at FROM chunks`)
@@ -797,6 +808,7 @@ func (store *Store) GraphData() (Graph, error) {
 	defer relations.Close()
 
 	edgeDistances := map[[2]int64]float64{}
+	linkCounts := map[[2]int64]int{}
 	for relations.Next() {
 		var sourced int64
 		var target int64
@@ -816,6 +828,7 @@ func (store *Store) GraphData() (Graph, error) {
 		if pair[0] > pair[1] {
 			pair[0], pair[1] = pair[1], pair[0]
 		}
+		linkCounts[pair]++
 		if existing, seen := edgeDistances[pair]; !seen || distance < existing {
 			edgeDistances[pair] = distance
 		}
@@ -826,6 +839,9 @@ func (store *Store) GraphData() (Graph, error) {
 
 	edges := make([]GraphEdge, 0, len(edgeDistances))
 	for pair, distance := range edgeDistances {
+		if linkCounts[pair] < minDocumentLinks && distance >= strongLinkDistance {
+			continue
+		}
 		edges = append(edges, GraphEdge{Source: pair[0], Target: pair[1], Distance: distance})
 	}
 
