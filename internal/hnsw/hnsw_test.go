@@ -297,3 +297,33 @@ func TestDefaultsFillInZeroParams(t *testing.T) {
 		t.Errorf("zero params were not defaulted: %+v", params)
 	}
 }
+
+func TestGroundTruthGuardRejectsQueriesFromOtherClusters(t *testing.T) {
+	size, queryCount, dimensions := 2000, 10, 768
+
+	// The old generator seeded queries separately so they landed on centroids with no corpus vectors
+	vectors := randomUnitVectorsBench(size, dimensions, int64(size))
+	queries := randomUnitVectorsBench(queryCount, dimensions, int64(size)+1)
+	if err := checkGroundTruth(vectors, queries); err == nil {
+		t.Fatal("guard passed queries drawn around different centroids than the corpus")
+	}
+
+	vectors, queries = benchCorpus(size, queryCount, dimensions)
+	if err := checkGroundTruth(vectors, queries); err != nil {
+		t.Fatalf("guard rejected held out queries from the corpus distribution: %v", err)
+	}
+}
+
+func TestBenchCorpusHoldsOutQueries(t *testing.T) {
+	vectors, queries := benchCorpus(500, 20, 32)
+	if len(vectors) != 500 || len(queries) != 20 {
+		t.Fatalf("got %d vectors and %d queries, want 500 and 20", len(vectors), len(queries))
+	}
+	for queryIndex, query := range queries {
+		for index, vector := range vectors {
+			if distance(query, vector) < 1e-9 {
+				t.Fatalf("query %d is also corpus vector %d", queryIndex, index)
+			}
+		}
+	}
+}

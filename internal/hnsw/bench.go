@@ -79,8 +79,10 @@ func Run(config BenchmarkConfig, out io.Writer) ([]BenchmarkRow, error) {
 	for _, size := range config.Sizes {
 		fmt.Fprintf(out, "building %d vectors (dim %d)... ", size, config.Dimensions)
 
-		vectors := randomUnitVectorsBench(size, config.Dimensions, int64(size))
-		queries := randomUnitVectorsBench(config.Queries, config.Dimensions, int64(size)+1)
+		vectors, queries := benchCorpus(size, config.Queries, config.Dimensions)
+		if err := checkGroundTruth(vectors, queries); err != nil {
+			return nil, err
+		}
 
 		index := New(config.Params)
 		buildStart := time.Now()
@@ -101,6 +103,37 @@ func Run(config BenchmarkConfig, out io.Writer) ([]BenchmarkRow, error) {
 	}
 
 	return rows, nil
+}
+
+// benchCorpus generates the corpus and its queries from one seed so they share the same clusters.
+// The queries are held out of the corpus so none of them can match itself exactly
+func benchCorpus(size, queryCount, dimensions int) ([][]float32, [][]float32) {
+	all := randomUnitVectorsBench(size+queryCount, dimensions, int64(size))
+	return all[:size], all[size:]
+}
+
+// tieRatioLimit is how close the nearest neighbor can get to the median distance before
+// the ground truth counts as a pile of ties
+const tieRatioLimit = 0.8
+
+// checkGroundTruth refuses to benchmark when a query's nearest neighbor is barely closer than
+// the rest of the corpus, since recall against near ties measures noise and not the index
+func checkGroundTruth(vectors, queries [][]float32) error {
+	distances := make([]float64, len(vectors))
+	for queryIndex, query := range queries {
+		for index, vector := range vectors {
+			distances[index] = distance(query, vector)
+		}
+		sort.Float64s(distances)
+		nearest := distances[0]
+		middle := distances[len(distances)/2]
+		if middle <= 0 || nearest >= tieRatioLimit*middle {
+			return fmt.Errorf("query %d: nearest distance %.4f is %.2f of the median %.4f (limit %.2f), "+
+				"so the ground truth is near ties and recall would be meaningless",
+				queryIndex, nearest, nearest/middle, middle, tieRatioLimit)
+		}
+	}
+	return nil
 }
 
 // measure times both search paths and scores the approximate one against the exact.
@@ -142,8 +175,10 @@ func measure(index *Index, vectors, queries [][]float32, k int) BenchmarkRow {
 // single fixed corpus. This is the trade-off curve — the thing efSearch actually buys.
 func RunEfSweep(config BenchmarkConfig, size int, out io.Writer) ([]BenchmarkRow, error) {
 	fmt.Fprintf(out, "building %d vectors for the efSearch sweep... ", size)
-	vectors := randomUnitVectorsBench(size, config.Dimensions, int64(size))
-	queries := randomUnitVectorsBench(config.Queries, config.Dimensions, int64(size)+1)
+	vectors, queries := benchCorpus(size, config.Queries, config.Dimensions)
+	if err := checkGroundTruth(vectors, queries); err != nil {
+		return nil, err
+	}
 
 	index := New(config.Params)
 	buildStart := time.Now()

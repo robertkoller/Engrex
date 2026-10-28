@@ -282,20 +282,22 @@ schema changes in one phase made the old approach untenable.
 
 `internal/hnsw` — layer assignment, greedy descent, dual-heap bounded search, the
 neighbor-selection heuristic, degree pruning, and atomic `Save`/`Load`. Benchmarked via
-`engrex bench-hnsw`. Ten tests including graph connectivity and degree bounds.
+`engrex bench-hnsw`. Twelve tests including graph connectivity, degree bounds, and a
+guard that rejects benchmark queries whose ground truth is near ties.
 
 Full results and methodology in [hnsw.md](hnsw.md). The headline: **it is off by
-default and should stay off.** At `efSearch=64` recall degrades with corpus size
-(0.984 → 0.756 → 0.480) because a fixed candidate budget explores a shrinking fraction
-of a growing graph; holding recall means raising `efSearch`, which spends the speedup
-back. The 32.78× at 20k vectors is measured at 0.480 recall and is not a usable
-operating point.
+default for retrieval and should stay off.** On the clustered synthetic corpus,
+recall@10 is 1.000 at 1K, 5K and 20K vectors with `efSearch=64`, at 34.11× faster than
+brute force at 20K. That is an upper bound, since the synthetic clusters are an easy
+case. Exact search stays the default because the live corpus is tiny and a linear scan
+is invisible next to embedding and generation, not because of recall.
 
-Writing the benchmark surfaced a methodology trap worth more than the index: uniform
+Writing the benchmark surfaced methodology traps worth more than the index: uniform
 random vectors are an invalid ANN corpus at 768 dimensions (concentration of measure
-makes ground truth noise), and per-dimension Gaussian spread is not cluster spread
-(`0.35 · sqrt(768) ≈ 9.7` swamps a unit centroid). Both produced plausible-looking,
-meaningless numbers. Documented in full.
+makes ground truth noise), per-dimension Gaussian spread is not cluster spread
+(`0.35 · sqrt(768) ≈ 9.7` swamps a unit centroid), and queries seeded separately from
+the corpus land on empty clusters. The last one produced the 0.984 → 0.756 → 0.480
+recall curve this section used to report, which was invalid. Documented in full.
 
 ### Phase 4 — Reranking ✅ built
 
